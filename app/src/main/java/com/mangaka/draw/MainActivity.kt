@@ -41,6 +41,7 @@ enum class Mode(val key: String, val label: String) {
 class MainActivity : Activity() {
 
     private lateinit var page: DrawingView
+    private lateinit var layersPanel: LayersPanel
     private lateinit var prefs: SharedPreferences
     private val pageFile by lazy { File(filesDir, "current.mpage") }
 
@@ -51,19 +52,26 @@ class MainActivity : Activity() {
     )
     private val current: BrushSettings get() = settings.getValue(mode)
 
-    // Controls that change when the mode changes.
+    // Controls that change with the mode or tool.
     private val modeButtons = mutableMapOf<Mode, Button>()
     private lateinit var sizeSlider: SliderHandle
     private lateinit var stabilizerSlider: SliderHandle
     private lateinit var smoothingSlider: SliderHandle
     private lateinit var taperToggle: ToggleHandle
     private lateinit var snapToggle: ToggleHandle
+    private lateinit var strokeEraseButton: Button
+    private lateinit var pixelEraseButton: Button
     private lateinit var colorSwatch: View
+    private lateinit var penGroup: View
+    private lateinit var eraserGroup: View
+    private lateinit var fillGroup: View
 
     private lateinit var penButton: Button
     private lateinit var eraserButton: Button
+    private lateinit var fillButton: Button
     private lateinit var undoButton: Button
     private lateinit var redoButton: Button
+    private lateinit var layersToggle: ToggleHandle
 
     private val density by lazy { resources.displayMetrics.density }
     private fun dp(v: Int) = (v * density).toInt()
@@ -75,14 +83,20 @@ class MainActivity : Activity() {
 
         page = DrawingView(this)
         loadSettings()
-        PageStore.load(pageFile)?.let { (spec, strokes) -> page.loadPage(spec, strokes) }
+        PageStore.load(pageFile)?.let { (spec, doc) -> page.loadPage(spec, doc) }
+        layersPanel = LayersPanel(this, page)
+        layersPanel.visibility = if (prefs.getBoolean("layersOpen", true)) View.VISIBLE else View.GONE
+
+        val middle = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        middle.addView(page, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+        middle.addView(layersPanel, LinearLayout.LayoutParams(dp(280), LinearLayout.LayoutParams.MATCH_PARENT))
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(TOOLBAR_BG)
         }
         root.addView(scrollable(buildTopBar()), matchWrap())
-        root.addView(page, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(middle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         root.addView(scrollable(buildBottomBar()), matchWrap())
 
         // Android 15 draws apps edge to edge; keep both bars clear of the system bars.
@@ -98,7 +112,11 @@ class MainActivity : Activity() {
         }
 
         setContentView(root)
-        page.onChanged = { updateButtons() }
+        page.onChanged = {
+            updateButtons()
+            layersPanel.refresh()
+        }
+        page.onMessage = { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
         applyMode()
         updateButtons()
     }
@@ -107,7 +125,7 @@ class MainActivity : Activity() {
         super.onPause()
         saveSettings()
         try {
-            PageStore.save(pageFile, page.spec, ArrayList(page.strokes))
+            PageStore.save(pageFile, page.spec, page.doc)
         } catch (e: Exception) {
             Toast.makeText(this, "Couldn't save the page: ${e.message}", Toast.LENGTH_LONG).show()
         }
@@ -117,7 +135,7 @@ class MainActivity : Activity() {
     // Bars
     // ---------------------------------------------------------------------
 
-    /** Top bar: mode and pen settings. */
+    /** Top bar: mode, then the settings for whichever tool is selected. */
     private fun buildTopBar(): View {
         val bar = barLayout()
 
@@ -128,6 +146,8 @@ class MainActivity : Activity() {
         }
         bar.addView(divider())
 
+        // Pen settings
+        val pen = barLayout().apply { setPadding(0, 0, 0, 0) }
         sizeSlider = slider("Size", 1, 120, current.size.toInt(), { sizeText(it) }) {
             current.size = it.toFloat()
             page.brushSize = current.size
@@ -140,18 +160,42 @@ class MainActivity : Activity() {
             current.smoothing = it
             page.smoothing = it
         }
-        val eraserSlider = slider("Eraser size", 8, 120, page.eraserSizeDp.toInt(), { "$it dp" }) {
-            page.eraserSizeDp = it.toFloat()
+        for (s in listOf(sizeSlider, stabilizerSlider, smoothingSlider)) {
+            pen.addView(s.view, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
-        for (s in listOf(sizeSlider, stabilizerSlider, smoothingSlider, eraserSlider)) {
-            bar.addView(s.view, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        }
-        bar.addView(divider())
-
         taperToggle = toggle("Taper", current.taper) { current.taper = it; page.taper = it }
         snapToggle = toggle("Snap lines", current.snap) { current.snap = it; page.snapLines = it }
-        bar.addView(taperToggle.button)
-        bar.addView(snapToggle.button)
+        pen.addView(taperToggle.button)
+        pen.addView(snapToggle.button)
+        penGroup = pen
+
+        // Eraser settings
+        val eraser = barLayout().apply { setPadding(0, 0, 0, 0) }
+        val eraserSize = slider("Eraser size", 8, 120, page.eraserSizeDp.toInt(), { "$it dp" }) {
+            page.eraserSizeDp = it.toFloat()
+        }
+        eraser.addView(eraserSize.view, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        strokeEraseButton = button("Whole strokes") { page.eraserMode = DrawingView.EraserMode.STROKE; updateButtons() }
+        pixelEraseButton = button("Pixel") { page.eraserMode = DrawingView.EraserMode.PIXEL; updateButtons() }
+        eraser.addView(strokeEraseButton)
+        eraser.addView(pixelEraseButton)
+        eraser.addView(hint("Whole strokes removes any line or color it touches. Pixel rubs out just what's under it."),
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.5f))
+        eraserGroup = eraser
+
+        // Fill settings
+        val fill = barLayout().apply { setPadding(0, 0, 0, 0) }
+        val gap = slider("Close gaps", 0, 10, page.fillGap, { if (it == 0) "off" else String.format(Locale.US, "%.1f mm", it * 0.5f) }) {
+            page.fillGap = it
+        }
+        fill.addView(gap.view, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        fill.addView(hint("Fills the area between lines on reference layers (or all visible layers if none are marked). Color goes on the selected layer, under its lines."),
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
+        fillGroup = fill
+
+        for (g in listOf(penGroup, eraserGroup, fillGroup)) {
+            bar.addView(g, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
         return bar
     }
 
@@ -161,13 +205,15 @@ class MainActivity : Activity() {
 
         penButton = button("Pen") { page.tool = DrawingView.Tool.PEN; updateButtons() }
         eraserButton = button("Eraser") { page.tool = DrawingView.Tool.ERASER; updateButtons() }
+        fillButton = button("Fill") { page.tool = DrawingView.Tool.FILL; updateButtons() }
         colorSwatch = View(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(6) }
-            contentDescription = "Pen color"
+            contentDescription = "Color"
             setOnClickListener { showPalette() }
         }
         bar.addView(penButton)
         bar.addView(eraserButton)
+        bar.addView(fillButton)
         bar.addView(colorSwatch)
         bar.addView(spacer())
 
@@ -177,6 +223,10 @@ class MainActivity : Activity() {
         bar.addView(redoButton)
         bar.addView(spacer())
 
+        layersToggle = toggle("Layers", layersPanel.visibility == View.VISIBLE) {
+            layersPanel.visibility = if (it) View.VISIBLE else View.GONE
+        }
+        bar.addView(layersToggle.button)
         bar.addView(button("Fit") { page.fitToScreen() })
         bar.addView(toggle("Paper", page.showPaper) { page.showPaper = it }.button)
         bar.addView(toggle("Guides", page.showGuides) { page.showGuides = it }.button)
@@ -184,7 +234,7 @@ class MainActivity : Activity() {
         bar.addView(spacer())
 
         bar.addView(button("New page") { showNewPage() })
-        bar.addView(button("Clear") { confirmClear() })
+        bar.addView(button("Clear layer") { confirmClear() })
         bar.addView(button("Export") { showExport() })
         return bar
     }
@@ -208,7 +258,7 @@ class MainActivity : Activity() {
         page.taper = s.taper
         page.snapLines = s.snap
         page.color = s.color
-        page.tool = DrawingView.Tool.PEN
+        if (page.tool == DrawingView.Tool.ERASER) page.tool = DrawingView.Tool.PEN
 
         sizeSlider.set(s.size.toInt())
         stabilizerSlider.set(s.stabilizer)
@@ -247,7 +297,7 @@ class MainActivity : Activity() {
             grid.addView(row)
         }
         dialog = AlertDialog.Builder(this)
-            .setTitle("Pen color (${mode.label})")
+            .setTitle("Color (${mode.label})")
             .setView(grid)
             .setNegativeButton("Close", null)
             .show()
@@ -294,6 +344,17 @@ class MainActivity : Activity() {
     private fun sizeText(px: Int): String {
         val mm = page.spec.pxToMm(px.toFloat())
         return String.format(Locale.US, "%d px · %.2f mm", px, mm)
+    }
+
+    private fun hint(text: String) = TextView(this).apply {
+        this.text = text
+        textSize = 11f
+        setTextColor(LABEL_COLOR)
+        setPadding(dp(8), 0, dp(8), 0)
+        minimumWidth = dp(160)
+        // Wrap onto a few lines instead of stretching the bar.
+        maxWidth = dp(340)
+        maxLines = 3
     }
 
     private fun button(text: String, onClick: () -> Unit): Button = Button(this).apply {
@@ -381,14 +442,21 @@ class MainActivity : Activity() {
     }
 
     private fun updateButtons() {
-        penButton.background = pill(if (page.tool == DrawingView.Tool.PEN) ACTIVE_BG else BUTTON_BG)
-        eraserButton.background = pill(if (page.tool == DrawingView.Tool.ERASER) ACTIVE_BG else BUTTON_BG)
+        val tool = page.tool
+        penButton.background = pill(if (tool == DrawingView.Tool.PEN) ACTIVE_BG else BUTTON_BG)
+        eraserButton.background = pill(if (tool == DrawingView.Tool.ERASER) ACTIVE_BG else BUTTON_BG)
+        fillButton.background = pill(if (tool == DrawingView.Tool.FILL) ACTIVE_BG else BUTTON_BG)
+        penGroup.visibility = if (tool == DrawingView.Tool.PEN) View.VISIBLE else View.GONE
+        eraserGroup.visibility = if (tool == DrawingView.Tool.ERASER) View.VISIBLE else View.GONE
+        fillGroup.visibility = if (tool == DrawingView.Tool.FILL) View.VISIBLE else View.GONE
+        val pixel = page.eraserMode == DrawingView.EraserMode.PIXEL
+        strokeEraseButton.background = pill(if (!pixel) ACTIVE_BG else BUTTON_BG)
+        pixelEraseButton.background = pill(if (pixel) ACTIVE_BG else BUTTON_BG)
         colorSwatch.background = swatch(current.color, selected = false)
         undoButton.isEnabled = page.history.canUndo
         redoButton.isEnabled = page.history.canRedo
         undoButton.alpha = if (page.history.canUndo) 1f else 0.4f
         redoButton.alpha = if (page.history.canRedo) 1f else 0.4f
-        sizeSlider.set(current.size.toInt())
     }
 
     // ---------------------------------------------------------------------
@@ -398,16 +466,18 @@ class MainActivity : Activity() {
     private fun showNewPage() {
         NewPageDialog.show(this, page.spec) { spec ->
             page.newPage(spec)
-            PageStore.save(pageFile, page.spec, emptyList())
+            PageStore.save(pageFile, page.spec, page.doc)
+            sizeSlider.set(current.size.toInt())
             updateButtons()
         }
     }
 
     private fun confirmClear() {
+        val layer = page.doc.active
         AlertDialog.Builder(this)
-            .setTitle("Clear page?")
-            .setMessage("Removes every stroke. You can undo this.")
-            .setPositiveButton("Clear") { _, _ -> page.clearPage() }
+            .setTitle("Clear “${layer.name}”?")
+            .setMessage("Removes everything on this layer. You can undo this.")
+            .setPositiveButton("Clear") { _, _ -> page.clearLayer() }
             .setNegativeButton("Cancel", null)
             .show()
     }
@@ -422,7 +492,7 @@ class MainActivity : Activity() {
 
     private fun export(transparent: Boolean) {
         val spec = page.spec
-        val snapshot = ArrayList(page.strokes)
+        val snapshot = page.doc.snapshot()
         Toast.makeText(this, "Exporting…", Toast.LENGTH_SHORT).show()
         Thread {
             val uri = try {
@@ -454,6 +524,8 @@ class MainActivity : Activity() {
             s.color = prefs.getInt("$k.color", s.color)
         }
         page.eraserSizeDp = prefs.getFloat("eraserSizeDp", 32f)
+        page.eraserMode = if (prefs.getString("eraserMode", "stroke") == "pixel") DrawingView.EraserMode.PIXEL else DrawingView.EraserMode.STROKE
+        page.fillGap = prefs.getInt("fillGap", 3)
         page.showPaper = prefs.getBoolean("showPaper", true)
         page.showGuides = prefs.getBoolean("showGuides", true)
         page.fingerDraws = prefs.getBoolean("fingerDraws", false)
@@ -473,9 +545,12 @@ class MainActivity : Activity() {
             e.putInt("$k.color", s.color)
         }
         e.putFloat("eraserSizeDp", page.eraserSizeDp)
+        e.putString("eraserMode", if (page.eraserMode == DrawingView.EraserMode.PIXEL) "pixel" else "stroke")
+        e.putInt("fillGap", page.fillGap)
         e.putBoolean("showPaper", page.showPaper)
         e.putBoolean("showGuides", page.showGuides)
         e.putBoolean("fingerDraws", page.fingerDraws)
+        e.putBoolean("layersOpen", layersPanel.visibility == View.VISIBLE)
         e.apply()
     }
 

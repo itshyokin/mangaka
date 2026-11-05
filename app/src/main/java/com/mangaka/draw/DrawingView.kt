@@ -14,6 +14,7 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -28,19 +29,25 @@ import kotlin.math.min
 @SuppressLint("ViewConstructor")
 class DrawingView(context: Context) : View(context) {
 
-    enum class Tool { PEN, ERASER }
+    enum class Tool { PEN, ERASER, FILL }
+    enum class EraserMode { STROKE, PIXEL }
 
-    /** Called whenever the stroke list or undo/redo availability changes. */
+    /** Called whenever the drawing, the layers, or undo/redo availability changes. */
     var onChanged: (() -> Unit)? = null
+    /** Short messages for the user ("This layer is locked"). */
+    var onMessage: ((String) -> Unit)? = null
 
     var spec: PageSpec = PageSpec.fromPreset(Preset.MANGA_B4, 600)
         private set
-    val strokes = ArrayList<Stroke>()
-    val history = History(strokes)
+    var doc: Document = Document.standard()
+        private set
+    var history = History(doc)
+        private set
 
     // ---- Settings (set by the toolbar) ----
     var tool = Tool.PEN
         set(v) { field = v; invalidate() }
+    var eraserMode = EraserMode.STROKE
     /** Pen width in page pixels. */
     var brushSize = 12f
     /** Eraser diameter in dp (screen-relative, so it feels the same at any zoom). */
@@ -52,14 +59,16 @@ class DrawingView(context: Context) : View(context) {
     var taper = true
     var snapLines = true
     var fingerDraws = false
+    /** 0..10: how large a gap between lines the paint bucket seals (steps of 0.5 mm). */
+    var fillGap = 3
     var showPaper = true
         set(v) { field = v; invalidate() }
     var showGuides = true
         set(v) { field = v; invalidate() }
+    /** Current pen and fill color (opaque). */
+    var color = Color.BLACK
 
     private val density = resources.displayMetrics.density
-    /** Current pen color (opaque). */
-    var color = Color.BLACK
 
     // ---- View transform: screen = page * scale + (tx, ty) ----
     private var scale = 1f
@@ -68,12 +77,13 @@ class DrawingView(context: Context) : View(context) {
     private var fitScale = 1f
     private var needsFit = true
 
-    // ---- Cached render of finished strokes, in screen space ----
+    // ---- Cached render of all layers, in screen space ----
     private var cache: Bitmap? = null
     private var cacheScale = 1f
     private var cacheTx = 0f
     private var cacheTy = 0f
     private var cacheValid = false
+    private val renderer = DocRenderer()
 
     // ---- Paints ----
     private val inkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -118,7 +128,17 @@ class DrawingView(context: Context) : View(context) {
     private var pressureEma = 0.5f
     private var rawX = 0f
     private var rawY = 0f
-    private val removedThisStroke = ArrayList<Pair<Int, Stroke>>()
+    private var strokeLayer: Layer? = null
+
+    // Erasing: a snapshot of the layer before this eraser stroke, for undo.
+    private var eraseBefore: Contents? = null
+    private var eraseChanged = false
+    private var eraseMode = EraserMode.STROKE
+    private var lastEraseX = 0f
+    private var lastEraseY = 0f
+
+    // Paint bucket
+    private var fillRunning = false
 
     // Hold-to-snap: pausing at the end of a stroke turns it into a straight line.
     private var snapActive = false
@@ -150,47 +170,135 @@ class DrawingView(context: Context) : View(context) {
     private val touchSlop = 10f * density
 
     // =====================================================================
-    // Public API
+    // Public API: pages and history
     // =====================================================================
 
-    fun loadPage(newSpec: PageSpec, loaded: List<Stroke>) {
+    fun loadPage(newSpec: PageSpec, newDoc: Document) {
         spec = newSpec
-        strokes.clear()
-        strokes.addAll(loaded)
-        history.reset()
+        doc = newDoc
+        history = History(newDoc)
         needsFit = true
         if (width > 0) fitToScreen()
-        cacheValid = false
-        invalidate()
-        onChanged?.invoke()
+        contentChanged()
     }
 
-    fun newPage(newSpec: PageSpec) = loadPage(newSpec, emptyList())
+    fun newPage(newSpec: PageSpec) = loadPage(newSpec, Document.standard())
 
-    fun clearPage() {
-        history.clearAll()
-        cacheValid = false
-        invalidate()
-        onChanged?.invoke()
+    /** Clears the active layer (undoable). */
+    fun clearLayer() {
+        val layer = doc.active
+        if (!canEdit(layer)) return
+        if (layer.strokes.isEmpty() && layer.fills.isEmpty()) return
+        val before = Contents.of(layer)
+        layer.strokes.clear()
+        layer.fills.clear()
+        history.push(ContentEdit(layer, before, Contents.of(layer)))
+        contentChanged()
     }
 
     fun undo() {
-        if (drawing) return
-        if (history.undo()) {
-            cacheValid = false
-            invalidate()
-            onChanged?.invoke()
-        }
+        if (drawing || fillRunning) return
+        if (history.undo()) contentChanged()
     }
 
     fun redo() {
-        if (drawing) return
-        if (history.redo()) {
-            cacheValid = false
-            invalidate()
-            onChanged?.invoke()
-        }
+        if (drawing || fillRunning) return
+        if (history.redo()) contentChanged()
     }
+
+    // =====================================================================
+    // Public API: layers
+    // =====================================================================
+
+    fun selectLayer(layer: Layer) {
+        doc.setActive(layer)
+        onChanged?.invoke()
+    }
+
+    /** Adds a new layer above the active one. */
+    fun addLayer() {
+        val before = ArrayList(doc.layers)
+        val activeBefore = doc.active
+        val layer = Layer(doc.nextLayerName())
+        doc.layers.add(doc.activeIndex + 1, layer)
+        doc.setActive(layer)
+        history.push(LayersEdit(before, ArrayList(doc.layers), activeBefore, layer))
+        contentChanged()
+    }
+
+    fun duplicateLayer() {
+        val src = doc.active
+        val before = ArrayList(doc.layers)
+        val copy = Layer(src.name + " copy").apply {
+            strokes.addAll(src.strokes)
+            fills.addAll(src.fills)
+            opacity = src.opacity
+            blend = src.blend
+        }
+        doc.layers.add(doc.activeIndex + 1, copy)
+        doc.setActive(copy)
+        history.push(LayersEdit(before, ArrayList(doc.layers), src, copy))
+        contentChanged()
+    }
+
+    fun deleteActiveLayer() {
+        if (doc.layers.size <= 1) {
+            onMessage?.invoke("A page needs at least one layer")
+            return
+        }
+        val before = ArrayList(doc.layers)
+        val removed = doc.active
+        val idx = doc.activeIndex
+        doc.layers.removeAt(idx)
+        doc.activeIndex = (idx - 1).coerceAtLeast(0)
+        history.push(LayersEdit(before, ArrayList(doc.layers), removed, doc.active))
+        contentChanged()
+    }
+
+    /** Moves the active layer up (+1) or down (-1) in the stack. */
+    fun moveActiveLayer(delta: Int) {
+        val i = doc.activeIndex
+        val j = i + delta
+        if (j !in doc.layers.indices) return
+        val before = ArrayList(doc.layers)
+        val layer = doc.layers.removeAt(i)
+        doc.layers.add(j, layer)
+        doc.activeIndex = j
+        history.push(LayersEdit(before, ArrayList(doc.layers), layer, layer))
+        contentChanged()
+    }
+
+    /** Merges the active layer into the one below it (undoable). */
+    fun mergeDown() {
+        val i = doc.activeIndex
+        if (i == 0) {
+            onMessage?.invoke("There's no layer below to merge into")
+            return
+        }
+        val top = doc.layers[i]
+        val below = doc.layers[i - 1]
+        if (!top.isPlain) onMessage?.invoke("Merged without the layer's opacity and blend mode")
+        // Replace the lower layer with a merged copy, so undo can restore both.
+        val beforeLayers = ArrayList(doc.layers)
+        val merged = Layer(below.name).apply {
+            strokes.addAll(below.strokes); strokes.addAll(top.strokes)
+            fills.addAll(below.fills); fills.addAll(top.fills)
+            visible = below.visible; locked = below.locked; reference = below.reference || top.reference
+            opacity = below.opacity; blend = below.blend
+        }
+        doc.layers[i - 1] = merged
+        doc.layers.removeAt(i)
+        doc.setActive(merged)
+        history.push(LayersEdit(beforeLayers, ArrayList(doc.layers), top, merged))
+        contentChanged()
+    }
+
+    /** Call after changing a layer's visibility, opacity, blend mode or name. */
+    fun layerPropertiesChanged() = contentChanged()
+
+    // =====================================================================
+    // Public API: view
+    // =====================================================================
 
     fun fitToScreen() {
         if (width == 0 || height == 0) { needsFit = true; return }
@@ -205,6 +313,12 @@ class DrawingView(context: Context) : View(context) {
         needsFit = false
         cacheValid = false
         invalidate()
+    }
+
+    private fun contentChanged() {
+        cacheValid = false
+        invalidate()
+        onChanged?.invoke()
     }
 
     // =====================================================================
@@ -225,27 +339,32 @@ class DrawingView(context: Context) : View(context) {
         cacheValid = false
     }
 
+    private fun visiblePageRect() = RectF(-tx / scale, -ty / scale, (width - tx) / scale, (height - ty) / scale)
+
     private fun rebuildCache() {
         val bmp = cache ?: return
         bmp.eraseColor(Color.TRANSPARENT)
         val c = Canvas(bmp)
         c.translate(tx, ty)
         c.scale(scale, scale)
-        val visible = RectF(-tx / scale, -ty / scale, (width - tx) / scale, (height - ty) / scale)
-        val step = 1f / scale
-        for (s in strokes) {
-            if (RectF.intersects(s.bounds, visible)) StrokeRenderer.draw(c, s, inkPaint, step)
-        }
+        renderer.draw(c, doc, visiblePageRect(), 1f / scale)
         cacheScale = scale
         cacheTx = tx
         cacheTy = ty
         cacheValid = true
     }
 
-    /** Draws one new stroke into the cache without a full rebuild, when the view hasn't moved. */
-    private fun appendToCache(s: Stroke) {
+    /**
+     * Draws one new stroke into the cache without a full rebuild. Only possible when the
+     * view hasn't moved and the stroke's layer is the plain top-most visible layer;
+     * otherwise layers above it or its blend mode would change the result.
+     */
+    private fun appendToCache(layer: Layer, s: Stroke) {
         val bmp = cache
-        if (bmp == null || !cacheValid || cacheScale != scale || cacheTx != tx || cacheTy != ty) {
+        val topVisible = doc.layers.lastOrNull { it.visible }
+        if (bmp == null || !cacheValid || cacheScale != scale || cacheTx != tx || cacheTy != ty ||
+            layer !== topVisible || !layer.isPlain
+        ) {
             cacheValid = false
             return
         }
@@ -263,7 +382,7 @@ class DrawingView(context: Context) : View(context) {
         canvas.drawRect(pageRect.left + sh, pageRect.top + sh, pageRect.right + sh, pageRect.bottom + sh, shadowPaint)
         canvas.drawRect(pageRect, if (showPaper) paperPaint else checkerPaint)
 
-        // Finished strokes, from the cache. While pinching we stretch the old cache
+        // All layers, from the cache. While pinching we stretch the old cache
         // and rebuild it sharp when the fingers lift.
         if (!cacheValid && !gestureActive) rebuildCache()
         val bmp = cache
@@ -294,10 +413,17 @@ class DrawingView(context: Context) : View(context) {
             canvas.drawCircle(rawX, rawY, eraserSizeDp * density / 2f, cursorPaint)
         } else if (hovering && !drawing) {
             val eraseHover = tool == Tool.ERASER || hoverButton
-            val r = if (eraseHover) eraserSizeDp * density / 2f else max(2f * density, brushSize * scale / 2f)
-            canvas.drawCircle(hoverX, hoverY, r, cursorPaint)
-            if (!eraseHover && stabilizer > 0) {
-                canvas.drawCircle(hoverX, hoverY, stringLength(), stringPaint)
+            when {
+                eraseHover -> canvas.drawCircle(hoverX, hoverY, eraserSizeDp * density / 2f, cursorPaint)
+                tool == Tool.FILL -> {
+                    val a = 8f * density
+                    canvas.drawLine(hoverX - a, hoverY, hoverX + a, hoverY, cursorPaint)
+                    canvas.drawLine(hoverX, hoverY - a, hoverX, hoverY + a, cursorPaint)
+                }
+                else -> {
+                    canvas.drawCircle(hoverX, hoverY, max(2f * density, brushSize * scale / 2f), cursorPaint)
+                    if (stabilizer > 0) canvas.drawCircle(hoverX, hoverY, stringLength(), stringPaint)
+                }
             }
         }
     }
@@ -329,6 +455,7 @@ class DrawingView(context: Context) : View(context) {
         val n = liveX.size
         if (n == 0) return
         livePaint.color = color
+        livePaint.alpha = ((strokeLayer?.opacity ?: 1f) * 255f).toInt().coerceIn(0, 255)
         if (snapActive) {
             snapPaint.strokeWidth = StrokeMath.width(brushSize, averagePressure())
             canvas.drawLine(liveX[0], liveY[0], snapEndX, snapEndY, snapPaint)
@@ -391,10 +518,14 @@ class DrawingView(context: Context) : View(context) {
                     requestUnbufferedDispatch(e)
                     penPointerId = e.getPointerId(ai)
                     val buttonErase = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-                    val erase = tool == Tool.ERASER || buttonErase ||
-                        e.getToolType(ai) == MotionEvent.TOOL_TYPE_ERASER
+                    val eraserTip = e.getToolType(ai) == MotionEvent.TOOL_TYPE_ERASER
                     hovering = false
-                    beginStroke(e.getX(ai), e.getY(ai), e.getPressure(ai), erase)
+                    when {
+                        buttonErase || eraserTip || tool == Tool.ERASER ->
+                            beginStroke(e.getX(ai), e.getY(ai), e.getPressure(ai), erase = true)
+                        tool == Tool.FILL -> fillAt(e.getX(ai), e.getY(ai))
+                        else -> beginStroke(e.getX(ai), e.getY(ai), e.getPressure(ai), erase = false)
+                    }
                 }
             }
             MotionEvent.ACTION_MOVE -> {
@@ -426,8 +557,12 @@ class DrawingView(context: Context) : View(context) {
                 maxPointers = 1
                 gestureMoved = false
                 if (fingerDraws) {
-                    fingerStroke = true
-                    beginStroke(e.x, e.y, FINGER_PRESSURE, tool == Tool.ERASER)
+                    if (tool == Tool.FILL) {
+                        fillAt(e.x, e.y)
+                    } else {
+                        fingerStroke = true
+                        beginStroke(e.x, e.y, FINGER_PRESSURE, tool == Tool.ERASER)
+                    }
                 } else {
                     gestureActive = true
                     capture(e, -1)
@@ -548,7 +683,7 @@ class DrawingView(context: Context) : View(context) {
     }
 
     // =====================================================================
-    // Strokes
+    // Strokes and erasing
     // =====================================================================
 
     private fun stringLength(): Float = stabilizer * 0.6f * density
@@ -556,15 +691,32 @@ class DrawingView(context: Context) : View(context) {
     private fun toPageX(sx: Float) = (sx - tx) / scale
     private fun toPageY(sy: Float) = (sy - ty) / scale
 
+    /** True if the layer can be drawn on; otherwise tells the user why not. */
+    private fun canEdit(layer: Layer): Boolean {
+        when {
+            layer.locked -> onMessage?.invoke("“${layer.name}” is locked")
+            !layer.visible -> onMessage?.invoke("“${layer.name}” is hidden")
+            else -> return true
+        }
+        return false
+    }
+
     private fun beginStroke(x: Float, y: Float, p: Float, erase: Boolean) {
+        val layer = doc.active
+        if (!canEdit(layer)) return
+        strokeLayer = layer
         drawing = true
         erasing = erase
         rawX = x
         rawY = y
         snapActive = false
         if (erase) {
-            removedThisStroke.clear()
-            eraseAt(x, y)
+            eraseBefore = Contents.of(layer)
+            eraseChanged = false
+            eraseMode = eraserMode
+            lastEraseX = toPageX(x)
+            lastEraseY = toPageY(y)
+            eraseAt(lastEraseX, lastEraseY)
             invalidate()
             return
         }
@@ -584,7 +736,7 @@ class DrawingView(context: Context) : View(context) {
         rawX = x
         rawY = y
         if (erasing) {
-            eraseAt(x, y)
+            eraseAlong(toPageX(x), toPageY(y))
             invalidate()
             return
         }
@@ -639,20 +791,19 @@ class DrawingView(context: Context) : View(context) {
         removeCallbacks(snapRunnable)
         if (!drawing) return
         drawing = false
+        val layer = strokeLayer
+        strokeLayer = null
         if (erasing) {
-            history.recordRemoval(ArrayList(removedThisStroke))
-            removedThisStroke.clear()
-            erasing = false
-            invalidate()
-            onChanged?.invoke()
+            finishErase(layer)
             return
         }
         val stroke = buildStroke()
         snapActive = false
         liveX.clear(); liveY.clear(); liveP.clear()
-        if (stroke != null) {
-            history.add(stroke)
-            appendToCache(stroke)
+        if (stroke != null && layer != null) {
+            layer.strokes.add(stroke)
+            history.push(AddStrokeEdit(layer, stroke))
+            appendToCache(layer, stroke)
             onChanged?.invoke()
         }
         invalidate()
@@ -660,11 +811,13 @@ class DrawingView(context: Context) : View(context) {
 
     private fun cancelStroke() {
         removeCallbacks(snapRunnable)
-        if (drawing && erasing && removedThisStroke.isNotEmpty()) {
-            // Strokes already erased stay erased, but remain undoable.
-            history.recordRemoval(ArrayList(removedThisStroke))
-            removedThisStroke.clear()
-            onChanged?.invoke()
+        val layer = strokeLayer
+        strokeLayer = null
+        if (drawing && erasing) {
+            // Whatever was already erased stays erased, but remains undoable.
+            drawing = false
+            finishErase(layer)
+            return
         }
         drawing = false
         erasing = false
@@ -673,22 +826,67 @@ class DrawingView(context: Context) : View(context) {
         invalidate()
     }
 
-    private fun eraseAt(sx: Float, sy: Float) {
-        val px = toPageX(sx)
-        val py = toPageY(sy)
-        val r = eraserSizeDp * density / 2f / scale
-        var i = strokes.size - 1
-        var any = false
-        while (i >= 0) {
-            val s = strokes[i]
-            if (s.hits(px, py, r)) {
-                strokes.removeAt(i)
-                removedThisStroke.add(i to s)
-                any = true
-            }
-            i--
+    private fun finishErase(layer: Layer?) {
+        val before = eraseBefore
+        if (layer != null && before != null && eraseChanged) {
+            history.push(ContentEdit(layer, before, Contents.of(layer)))
+            onChanged?.invoke()
         }
-        if (any) cacheValid = false
+        eraseBefore = null
+        erasing = false
+        invalidate()
+    }
+
+    /** Erases from the last eraser position to (px, py), so fast strokes leave no gaps. */
+    private fun eraseAlong(px: Float, py: Float) {
+        val r = eraserRadius()
+        val d = hypot(px - lastEraseX, py - lastEraseY)
+        val step = max(0.5f, r * 0.5f)
+        if (d < step * 0.5f) return
+        val n = ceil(d / step).toInt()
+        for (i in 1..n) {
+            val t = i.toFloat() / n
+            eraseAt(lastEraseX + (px - lastEraseX) * t, lastEraseY + (py - lastEraseY) * t)
+        }
+        lastEraseX = px
+        lastEraseY = py
+    }
+
+    private fun eraserRadius() = eraserSizeDp * density / 2f / scale
+
+    private fun eraseAt(px: Float, py: Float) {
+        val layer = strokeLayer ?: return
+        val r = eraserRadius()
+        var changed = false
+        if (eraseMode == EraserMode.STROKE) {
+            changed = layer.strokes.removeAll { it.hits(px, py, r) }
+            changed = layer.fills.removeAll { it.contains(px, py) } || changed
+        } else {
+            var i = layer.strokes.size - 1
+            while (i >= 0) {
+                val pieces = layer.strokes[i].eraseCircle(px, py, r)
+                if (pieces != null) {
+                    layer.strokes.removeAt(i)
+                    layer.strokes.addAll(i, pieces)
+                    changed = true
+                }
+                i--
+            }
+            var j = layer.fills.size - 1
+            while (j >= 0) {
+                val f = layer.fills[j]
+                val cut = f.erased(px, py, r)
+                if (cut !== f) {
+                    if (cut == null) layer.fills.removeAt(j) else layer.fills[j] = cut
+                    changed = true
+                }
+                j--
+            }
+        }
+        if (changed) {
+            eraseChanged = true
+            cacheValid = false
+        }
     }
 
     private fun averagePressure(): Float {
@@ -733,6 +931,53 @@ class DrawingView(context: Context) : View(context) {
     }
 
     private fun clampPressure(p: Float): Float = if (p <= 0f) 0.5f else p.coerceIn(0.05f, 1f)
+
+    // =====================================================================
+    // Paint bucket
+    // =====================================================================
+
+    private fun fillAt(sx: Float, sy: Float) {
+        val target = doc.active
+        if (!canEdit(target)) return
+        if (fillRunning) return
+        val px = toPageX(sx)
+        val py = toPageY(sy)
+        if (px < 0f || py < 0f || px >= spec.widthPx || py >= spec.heightPx) return
+
+        // Lines come from reference layers; with none marked, from every visible layer.
+        val refs = doc.layers.filter { it.visible && it.reference }
+        val sources = refs.ifEmpty { doc.layers.filter { it.visible } }
+        val lines = ArrayList<Stroke>()
+        for (l in sources) lines.addAll(l.strokes)
+
+        val gapPx = fillGap * 0.5f / 25.4f * spec.dpi
+        val fillColor = color
+        val pageSpec = spec
+        fillRunning = true
+        Thread {
+            val result = try {
+                FillEngine.compute(pageSpec, lines, px, py, gapPx, fillColor)
+            } catch (e: OutOfMemoryError) {
+                null
+            }
+            post {
+                fillRunning = false
+                when (result) {
+                    is FillEngine.Result.Filled -> {
+                        // The page may have changed while we worked; only add to a layer still in it.
+                        if (target in doc.layers) {
+                            target.fills.add(result.fill)
+                            history.push(AddFillEdit(target, result.fill))
+                            contentChanged()
+                        }
+                    }
+                    FillEngine.Result.OnLine -> onMessage?.invoke("Tap inside an area, not on a line")
+                    FillEngine.Result.Empty -> Unit
+                    null -> onMessage?.invoke("Not enough memory to fill")
+                }
+            }
+        }.start()
+    }
 
     private companion object {
         const val FINGER_PRESSURE = 0.6f

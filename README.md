@@ -20,6 +20,13 @@ A manga drawing app for Samsung tablets with an S Pen, built to turn shaky input
 
 Strokes are stored as vectors (centre line plus width per point), ready for fills, layers and editing in milestone 2.
 
+## Milestone 2: layers, fill, erasers
+
+- **Layers.** New pages start with *Ink* (lines) over *Flats* (color). Add, copy, merge down, delete, reorder, rename (long-press), hide, lock, set opacity and blend mode (Normal, Multiply, Screen, Overlay). Layer changes are undoable.
+- **Paint bucket.** Tap inside lines to fill. Lines come from *reference* layers (or all visible layers if none are marked); the color goes on the selected layer, tucked under the ink so there's no white halo. *Close gaps* seals small breaks between lines. Fills are vector outlines.
+- **Two erasers.** *Whole strokes* removes any line or fill it touches. *Pixel* rubs out only what's under it, splitting lines and cutting holes in fills.
+- **Contextual top bar.** Shows only the selected tool's settings.
+
 ## Building
 
 ### Option A: GitHub (no PC setup)
@@ -39,6 +46,11 @@ Open this folder in Android Studio, let it sync, connect the tablet with USB deb
 | `DrawingView.kt` | Canvas: input routing, stabilizer, live stroke, eraser, zoom/pan, rendering |
 | `Stroke.kt` | Vector stroke, rendering, resampling, smoothing, pressure and taper |
 | `History.kt` | Pulled-string stabilizer and undo/redo |
+| `Model.kt` | Layers, blend modes, and the page document |
+| `Fill.kt` | Vector color regions |
+| `FillEngine.kt` | Paint bucket: gap closing, flood fill, outline tracing |
+| `Render.kt` | Draws layers with opacity and blend modes |
+| `LayersPanel.kt` | Layers side panel |
 | `PageSpec.kt` | Page presets and print guides |
 | `PageStore.kt` | Save/load and PNG export |
 | `NewPageDialog.kt` | New-page picker |

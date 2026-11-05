@@ -30,41 +30,51 @@ class PulledString {
     }
 }
 
-sealed interface Edit
-class AddEdit(val stroke: Stroke) : Edit
-/** Strokes removed by the eraser, in removal order, each with the index it was removed from. */
-class RemoveEdit(val removed: List<Pair<Int, Stroke>>) : Edit
-class ClearEdit(val strokes: List<Stroke>) : Edit
+/** A layer's contents at one moment (cheap: copies references, not drawings). */
+class Contents(val strokes: List<Stroke>, val fills: List<Fill>) {
+    fun applyTo(layer: Layer) {
+        layer.strokes.clear(); layer.strokes.addAll(strokes)
+        layer.fills.clear(); layer.fills.addAll(fills)
+    }
 
-class History(private val strokes: MutableList<Stroke>) {
+    companion object {
+        fun of(layer: Layer) = Contents(ArrayList(layer.strokes), ArrayList(layer.fills))
+    }
+}
+
+sealed interface Edit
+class AddStrokeEdit(val layer: Layer, val stroke: Stroke) : Edit
+class AddFillEdit(val layer: Layer, val fill: Fill) : Edit
+/** Any other change to one layer's contents (erasing, clearing). */
+class ContentEdit(val layer: Layer, val before: Contents, val after: Contents) : Edit
+/** Layers added, deleted or reordered. */
+class LayersEdit(
+    val before: List<Layer>,
+    val after: List<Layer>,
+    val activeBefore: Layer,
+    val activeAfter: Layer,
+) : Edit
+
+class History(private val doc: Document) {
     private val undoStack = ArrayDeque<Edit>()
     private val redoStack = ArrayDeque<Edit>()
 
     val canUndo: Boolean get() = undoStack.isNotEmpty()
     val canRedo: Boolean get() = redoStack.isNotEmpty()
 
-    fun add(stroke: Stroke) {
-        strokes.add(stroke)
-        push(AddEdit(stroke))
-    }
-
-    fun recordRemoval(removed: List<Pair<Int, Stroke>>) {
-        if (removed.isNotEmpty()) push(RemoveEdit(removed))
-    }
-
-    fun clearAll() {
-        if (strokes.isEmpty()) return
-        val copy = ArrayList(strokes)
-        strokes.clear()
-        push(ClearEdit(copy))
+    fun push(e: Edit) {
+        undoStack.addLast(e)
+        if (undoStack.size > MAX_STEPS) undoStack.removeFirst()
+        redoStack.clear()
     }
 
     fun undo(): Boolean {
         val e = undoStack.removeLastOrNull() ?: return false
         when (e) {
-            is AddEdit -> strokes.remove(e.stroke)
-            is RemoveEdit -> for ((idx, s) in e.removed.asReversed()) strokes.add(idx.coerceAtMost(strokes.size), s)
-            is ClearEdit -> strokes.addAll(e.strokes)
+            is AddStrokeEdit -> e.layer.strokes.remove(e.stroke)
+            is AddFillEdit -> e.layer.fills.remove(e.fill)
+            is ContentEdit -> e.before.applyTo(e.layer)
+            is LayersEdit -> setLayers(e.before, e.activeBefore)
         }
         redoStack.addLast(e)
         return true
@@ -73,23 +83,19 @@ class History(private val strokes: MutableList<Stroke>) {
     fun redo(): Boolean {
         val e = redoStack.removeLastOrNull() ?: return false
         when (e) {
-            is AddEdit -> strokes.add(e.stroke)
-            is RemoveEdit -> for ((_, s) in e.removed) strokes.remove(s)
-            is ClearEdit -> strokes.clear()
+            is AddStrokeEdit -> e.layer.strokes.add(e.stroke)
+            is AddFillEdit -> e.layer.fills.add(e.fill)
+            is ContentEdit -> e.after.applyTo(e.layer)
+            is LayersEdit -> setLayers(e.after, e.activeAfter)
         }
         undoStack.addLast(e)
         return true
     }
 
-    fun reset() {
-        undoStack.clear()
-        redoStack.clear()
-    }
-
-    private fun push(e: Edit) {
-        undoStack.addLast(e)
-        if (undoStack.size > MAX_STEPS) undoStack.removeFirst()
-        redoStack.clear()
+    private fun setLayers(list: List<Layer>, active: Layer) {
+        doc.layers.clear()
+        doc.layers.addAll(list)
+        doc.setActive(active)
     }
 
     private companion object {

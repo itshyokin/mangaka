@@ -44,6 +44,57 @@ class Stroke(val xs: FloatArray, val ys: FloatArray, val ws: FloatArray, val col
         return false
     }
 
+    /**
+     * Pixel-style erase: removes the part of the line within [r] of (cx, cy), splitting
+     * the stroke where the eraser passes through. Returns null if the stroke is untouched,
+     * otherwise the remaining pieces (possibly none).
+     */
+    fun eraseCircle(cx: Float, cy: Float, r: Float): List<Stroke>? {
+        if (!hits(cx, cy, r)) return null
+        val nx = FloatList(size + 16)
+        val ny = FloatList(size + 16)
+        val nw = FloatList(size + 16)
+        val step = max(0.5f, r * 0.4f)
+        for (i in 0 until size) {
+            if (i > 0 && distToSegment(cx, cy, xs[i - 1], ys[i - 1], xs[i], ys[i]) < r) {
+                // Subdivide segments the eraser crosses so the cut lands where it touched.
+                val len = hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1])
+                val parts = ceil(len / step).toInt()
+                for (k in 1 until parts) {
+                    val t = k.toFloat() / parts
+                    nx.add(xs[i - 1] + (xs[i] - xs[i - 1]) * t)
+                    ny.add(ys[i - 1] + (ys[i] - ys[i - 1]) * t)
+                    nw.add(ws[i - 1] + (ws[i] - ws[i - 1]) * t)
+                }
+            }
+            nx.add(xs[i]); ny.add(ys[i]); nw.add(ws[i])
+        }
+        val n = nx.size
+        val inside = BooleanArray(n) { hypot(nx[it] - cx, ny[it] - cy) < r }
+        if (inside.none { it }) return null
+        val pieces = ArrayList<Stroke>()
+        var start = -1
+        for (i in 0..n) {
+            val keep = i < n && !inside[i]
+            if (keep && start < 0) start = i
+            if (!keep && start >= 0) {
+                val count = i - start
+                if (count >= 2) {
+                    pieces.add(
+                        Stroke(
+                            FloatArray(count) { nx[start + it] },
+                            FloatArray(count) { ny[start + it] },
+                            FloatArray(count) { nw[start + it] },
+                            color
+                        )
+                    )
+                }
+                start = -1
+            }
+        }
+        return pieces
+    }
+
     private fun distToSegment(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
         val dx = bx - ax
         val dy = by - ay
@@ -60,11 +111,11 @@ object StrokeRenderer {
      * [minStep] is the smallest segment worth drawing, in page px (about one screen pixel),
      * so zoomed-out redraws skip detail nobody can see.
      */
-    fun draw(c: Canvas, s: Stroke, paint: Paint, minStep: Float) {
+    fun draw(c: Canvas, s: Stroke, paint: Paint, minStep: Float, minWidth: Float = 0.5f) {
         paint.color = s.color
         if (s.size == 1) {
             paint.style = Paint.Style.FILL
-            c.drawCircle(s.xs[0], s.ys[0], s.ws[0] / 2f, paint)
+            c.drawCircle(s.xs[0], s.ys[0], max(minWidth, s.ws[0]) / 2f, paint)
             return
         }
         paint.style = Paint.Style.STROKE
@@ -73,7 +124,7 @@ object StrokeRenderer {
         for (i in 1 until s.size) {
             val last = i == s.size - 1
             if (!last && hypot(s.xs[i] - s.xs[j], s.ys[i] - s.ys[j]) < minStep) continue
-            paint.strokeWidth = max(0.5f, (s.ws[j] + s.ws[i]) * 0.5f)
+            paint.strokeWidth = max(minWidth, (s.ws[j] + s.ws[i]) * 0.5f)
             c.drawLine(s.xs[j], s.ys[j], s.xs[i], s.ys[i], paint)
             j = i
         }
