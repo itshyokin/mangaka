@@ -58,7 +58,8 @@ class DrawingView(context: Context) : View(context) {
         set(v) { field = v; invalidate() }
 
     private val density = resources.displayMetrics.density
-    private val ink = Color.BLACK
+    /** Current pen color (opaque). */
+    var color = Color.BLACK
 
     // ---- View transform: screen = page * scale + (tx, ty) ----
     private var scale = 1f
@@ -82,7 +83,6 @@ class DrawingView(context: Context) : View(context) {
     private val livePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         strokeCap = Paint.Cap.ROUND
         style = Paint.Style.STROKE
-        color = ink
     }
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val paperPaint = Paint().apply { color = Color.WHITE }
@@ -328,6 +328,7 @@ class DrawingView(context: Context) : View(context) {
     private fun drawLiveStroke(canvas: Canvas) {
         val n = liveX.size
         if (n == 0) return
+        livePaint.color = color
         if (snapActive) {
             snapPaint.strokeWidth = StrokeMath.width(brushSize, averagePressure())
             canvas.drawLine(liveX[0], liveY[0], snapEndX, snapEndY, snapPaint)
@@ -712,13 +713,13 @@ class DrawingView(context: Context) : View(context) {
             val xs = FloatArray(count) { x0 + (snapEndX - x0) * it / (count - 1) }
             val ys = FloatArray(count) { y0 + (snapEndY - y0) * it / (count - 1) }
             val ps = FloatArray(count) { p }
-            return Stroke(xs, ys, StrokeMath.widths(xs, ys, ps, brushSize, taper), ink)
+            return Stroke(xs, ys, StrokeMath.widths(xs, ys, ps, brushSize, taper), color)
         }
 
         if (n == 1) {
             return Stroke(
                 floatArrayOf(liveX[0]), floatArrayOf(liveY[0]),
-                floatArrayOf(StrokeMath.width(brushSize, liveP[0])), ink
+                floatArrayOf(StrokeMath.width(brushSize, liveP[0])), color
             )
         }
 
@@ -728,7 +729,7 @@ class DrawingView(context: Context) : View(context) {
         val xs = StrokeMath.smooth(r.xs, sigmaPts)
         val ys = StrokeMath.smooth(r.ys, sigmaPts)
         val ps = StrokeMath.smooth(r.ps, sigmaPts)
-        return Stroke(xs, ys, StrokeMath.widths(xs, ys, ps, brushSize, taper), ink)
+        return Stroke(xs, ys, StrokeMath.widths(xs, ys, ps, brushSize, taper), color)
     }
 
     private fun clampPressure(p: Float): Float = if (p <= 0f) 0.5f else p.coerceIn(0.05f, 1f)

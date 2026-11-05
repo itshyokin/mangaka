@@ -20,17 +20,50 @@ import android.widget.Toast
 import java.io.File
 import java.util.Locale
 
+/** Pen settings kept separately for each mode. */
+class BrushSettings(
+    var size: Float,
+    var stabilizer: Int,
+    var smoothing: Int,
+    var taper: Boolean,
+    var snap: Boolean,
+    var color: Int,
+)
+
+enum class Mode(val key: String, val label: String) {
+    /** Clean final lines: stabilizer, smoothing, taper and snap on by default. */
+    INK("ink", "Ink"),
+
+    /** Free drawing and coloring: everything that changes your line is off by default. */
+    SKETCH("sketch", "Sketch / Color"),
+}
+
 class MainActivity : Activity() {
 
     private lateinit var page: DrawingView
     private lateinit var prefs: SharedPreferences
     private val pageFile by lazy { File(filesDir, "current.mpage") }
 
+    private var mode = Mode.INK
+    private val settings = mutableMapOf(
+        Mode.INK to BrushSettings(12f, 40, 40, taper = true, snap = true, color = Color.BLACK),
+        Mode.SKETCH to BrushSettings(8f, 0, 0, taper = false, snap = false, color = Color.BLACK),
+    )
+    private val current: BrushSettings get() = settings.getValue(mode)
+
+    // Controls that change when the mode changes.
+    private val modeButtons = mutableMapOf<Mode, Button>()
+    private lateinit var sizeSlider: SliderHandle
+    private lateinit var stabilizerSlider: SliderHandle
+    private lateinit var smoothingSlider: SliderHandle
+    private lateinit var taperToggle: ToggleHandle
+    private lateinit var snapToggle: ToggleHandle
+    private lateinit var colorSwatch: View
+
     private lateinit var penButton: Button
     private lateinit var eraserButton: Button
     private lateinit var undoButton: Button
     private lateinit var redoButton: Button
-    private var sizeLabel: TextView? = null
 
     private val density by lazy { resources.displayMetrics.density }
     private fun dp(v: Int) = (v * density).toInt()
@@ -48,14 +81,11 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(TOOLBAR_BG)
         }
-        val scroller = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            addView(buildToolbar())
-        }
-        root.addView(scroller, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        root.addView(scrollable(buildTopBar()), matchWrap())
         root.addView(page, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(scrollable(buildBottomBar()), matchWrap())
 
-        // Android 15 draws apps edge to edge; keep the toolbar clear of the status bar.
+        // Android 15 draws apps edge to edge; keep both bars clear of the system bars.
         root.setOnApplyWindowInsetsListener { v, insets ->
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val b = insets.getInsets(WindowInsets.Type.systemBars())
@@ -69,6 +99,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
         page.onChanged = { updateButtons() }
+        applyMode()
         updateButtons()
     }
 
@@ -83,55 +114,182 @@ class MainActivity : Activity() {
     }
 
     // ---------------------------------------------------------------------
-    // Toolbar
+    // Bars
     // ---------------------------------------------------------------------
 
-    private fun buildToolbar(): View {
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+    /** Top bar: mode and pen settings. */
+    private fun buildTopBar(): View {
+        val bar = barLayout()
+
+        for (m in Mode.entries) {
+            val b = button(m.label) { setMode(m) }
+            modeButtons[m] = b
+            bar.addView(b)
         }
+        bar.addView(divider())
+
+        sizeSlider = slider("Size", 1, 120, current.size.toInt(), { sizeText(it) }) {
+            current.size = it.toFloat()
+            page.brushSize = current.size
+        }
+        stabilizerSlider = slider("Stabilizer", 0, 100, current.stabilizer, { if (it == 0) "off" else "$it" }) {
+            current.stabilizer = it
+            page.stabilizer = it
+        }
+        smoothingSlider = slider("Smoothing", 0, 100, current.smoothing, { if (it == 0) "off" else "$it" }) {
+            current.smoothing = it
+            page.smoothing = it
+        }
+        val eraserSlider = slider("Eraser size", 8, 120, page.eraserSizeDp.toInt(), { "$it dp" }) {
+            page.eraserSizeDp = it.toFloat()
+        }
+        for (s in listOf(sizeSlider, stabilizerSlider, smoothingSlider, eraserSlider)) {
+            bar.addView(s.view, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        bar.addView(divider())
+
+        taperToggle = toggle("Taper", current.taper) { current.taper = it; page.taper = it }
+        snapToggle = toggle("Snap lines", current.snap) { current.snap = it; page.snapLines = it }
+        bar.addView(taperToggle.button)
+        bar.addView(snapToggle.button)
+        return bar
+    }
+
+    /** Bottom bar: tools, history, view, and page actions. */
+    private fun buildBottomBar(): View {
+        val bar = barLayout()
 
         penButton = button("Pen") { page.tool = DrawingView.Tool.PEN; updateButtons() }
         eraserButton = button("Eraser") { page.tool = DrawingView.Tool.ERASER; updateButtons() }
+        colorSwatch = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(6) }
+            contentDescription = "Pen color"
+            setOnClickListener { showPalette() }
+        }
         bar.addView(penButton)
         bar.addView(eraserButton)
-        bar.addView(divider())
-
-        bar.addView(slider("Size", 1, 120, page.brushSize.toInt(), { sizeText(it) }) {
-            page.brushSize = it.toFloat()
-        })
-        bar.addView(slider("Eraser", 8, 120, page.eraserSizeDp.toInt(), { "$it dp" }) {
-            page.eraserSizeDp = it.toFloat()
-        })
-        bar.addView(slider("Stabilizer", 0, 100, page.stabilizer, { if (it == 0) "off" else "$it" }) {
-            page.stabilizer = it
-        })
-        bar.addView(slider("Smoothing", 0, 100, page.smoothing, { if (it == 0) "off" else "$it" }) {
-            page.smoothing = it
-        })
-        bar.addView(divider())
-
-        bar.addView(toggle("Taper", page.taper) { page.taper = it })
-        bar.addView(toggle("Snap lines", page.snapLines) { page.snapLines = it })
-        bar.addView(toggle("Paper", page.showPaper) { page.showPaper = it })
-        bar.addView(toggle("Guides", page.showGuides) { page.showGuides = it })
-        bar.addView(toggle("Finger draws", page.fingerDraws) { page.fingerDraws = it })
-        bar.addView(divider())
+        bar.addView(colorSwatch)
+        bar.addView(spacer())
 
         undoButton = button("Undo") { page.undo() }
         redoButton = button("Redo") { page.redo() }
         bar.addView(undoButton)
         bar.addView(redoButton)
-        bar.addView(divider())
+        bar.addView(spacer())
 
         bar.addView(button("Fit") { page.fitToScreen() })
+        bar.addView(toggle("Paper", page.showPaper) { page.showPaper = it }.button)
+        bar.addView(toggle("Guides", page.showGuides) { page.showGuides = it }.button)
+        bar.addView(toggle("Finger draws", page.fingerDraws) { page.fingerDraws = it }.button)
+        bar.addView(spacer())
+
         bar.addView(button("New page") { showNewPage() })
         bar.addView(button("Clear") { confirmClear() })
         bar.addView(button("Export") { showExport() })
         return bar
     }
+
+    // ---------------------------------------------------------------------
+    // Modes
+    // ---------------------------------------------------------------------
+
+    private fun setMode(m: Mode) {
+        if (m == mode) return
+        mode = m
+        applyMode()
+    }
+
+    /** Pushes the current mode's settings into the canvas and the controls. */
+    private fun applyMode() {
+        val s = current
+        page.brushSize = s.size
+        page.stabilizer = s.stabilizer
+        page.smoothing = s.smoothing
+        page.taper = s.taper
+        page.snapLines = s.snap
+        page.color = s.color
+        page.tool = DrawingView.Tool.PEN
+
+        sizeSlider.set(s.size.toInt())
+        stabilizerSlider.set(s.stabilizer)
+        smoothingSlider.set(s.smoothing)
+        taperToggle.set(s.taper)
+        snapToggle.set(s.snap)
+        for ((m, b) in modeButtons) b.background = pill(if (m == mode) ACTIVE_BG else BUTTON_BG)
+        updateButtons()
+    }
+
+    // ---------------------------------------------------------------------
+    // Color
+    // ---------------------------------------------------------------------
+
+    private fun showPalette() {
+        val columns = 6
+        val grid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(4))
+        }
+        var dialog: AlertDialog? = null
+        PALETTE.chunked(columns).forEach { rowColors ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (c in rowColors) {
+                val chip = View(this).apply {
+                    background = swatch(c, selected = c == current.color)
+                    setOnClickListener {
+                        current.color = c
+                        page.color = c
+                        updateButtons()
+                        dialog?.dismiss()
+                    }
+                }
+                row.addView(chip, LinearLayout.LayoutParams(dp(44), dp(44)).apply { setMargins(dp(5), dp(5), dp(5), dp(5)) })
+            }
+            grid.addView(row)
+        }
+        dialog = AlertDialog.Builder(this)
+            .setTitle("Pen color (${mode.label})")
+            .setView(grid)
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun swatch(color: Int, selected: Boolean) = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(color)
+        setStroke(dp(if (selected) 3 else 1), if (selected) ACTIVE_BG else 0x66FFFFFF)
+    }
+
+    // ---------------------------------------------------------------------
+    // Widgets
+    // ---------------------------------------------------------------------
+
+    private inner class SliderHandle(val view: View, private val bar: SeekBar) {
+        fun set(value: Int) {
+            bar.progress = value.coerceIn(bar.min, bar.max)
+        }
+    }
+
+    private inner class ToggleHandle(val button: Button, var on: Boolean) {
+        fun set(value: Boolean) {
+            on = value
+            button.background = pill(if (on) ACTIVE_BG else BUTTON_BG)
+        }
+    }
+
+    private fun barLayout() = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(8), dp(6), dp(8), dp(6))
+    }
+
+    /** Stretches to fill the screen width, and scrolls only if the screen is too narrow. */
+    private fun scrollable(content: View) = HorizontalScrollView(this).apply {
+        isHorizontalScrollBarEnabled = false
+        isFillViewport = true
+        addView(content, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+    }
+
+    private fun matchWrap() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
     private fun sizeText(px: Int): String {
         val mm = page.spec.pxToMm(px.toFloat())
@@ -156,17 +314,15 @@ class MainActivity : Activity() {
         setOnClickListener { onClick() }
     }
 
-    private fun toggle(text: String, initial: Boolean, onChange: (Boolean) -> Unit): Button {
-        var on = initial
+    private fun toggle(text: String, initial: Boolean, onChange: (Boolean) -> Unit): ToggleHandle {
         val b = button(text) {}
-        fun paint() { b.background = pill(if (on) ACTIVE_BG else BUTTON_BG) }
-        paint()
+        val handle = ToggleHandle(b, initial)
+        handle.set(initial)
         b.setOnClickListener {
-            on = !on
-            paint()
-            onChange(on)
+            handle.set(!handle.on)
+            onChange(handle.on)
         }
-        return b
+        return handle
     }
 
     private fun slider(
@@ -176,17 +332,17 @@ class MainActivity : Activity() {
         initial: Int,
         format: (Int) -> String,
         onChange: (Int) -> Unit,
-    ): View {
+    ): SliderHandle {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(6), 0, dp(10), 0)
+            minimumWidth = dp(140)
         }
         val label = TextView(this).apply {
             textSize = 12f
             setTextColor(LABEL_COLOR)
             text = "$name: ${format(initial)}"
         }
-        if (name == "Size") sizeLabel = label
         val bar = SeekBar(this).apply {
             this.min = min
             this.max = max
@@ -201,8 +357,8 @@ class MainActivity : Activity() {
             })
         }
         box.addView(label)
-        box.addView(bar, LinearLayout.LayoutParams(dp(170), LinearLayout.LayoutParams.WRAP_CONTENT))
-        return box
+        box.addView(bar, matchWrap())
+        return SliderHandle(box, bar)
     }
 
     private fun divider(): View = View(this).apply {
@@ -213,6 +369,12 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Flexible gap between button groups; collapses to a small gap on narrow screens. */
+    private fun spacer(): View = View(this).apply {
+        minimumWidth = dp(12)
+        layoutParams = LinearLayout.LayoutParams(0, dp(1), 1f)
+    }
+
     private fun pill(color: Int) = GradientDrawable().apply {
         cornerRadius = dp(10).toFloat()
         setColor(color)
@@ -221,11 +383,12 @@ class MainActivity : Activity() {
     private fun updateButtons() {
         penButton.background = pill(if (page.tool == DrawingView.Tool.PEN) ACTIVE_BG else BUTTON_BG)
         eraserButton.background = pill(if (page.tool == DrawingView.Tool.ERASER) ACTIVE_BG else BUTTON_BG)
+        colorSwatch.background = swatch(current.color, selected = false)
         undoButton.isEnabled = page.history.canUndo
         redoButton.isEnabled = page.history.canRedo
         undoButton.alpha = if (page.history.canUndo) 1f else 0.4f
         redoButton.alpha = if (page.history.canRedo) 1f else 0.4f
-        sizeLabel?.text = "Size: ${sizeText(page.brushSize.toInt())}"
+        sizeSlider.set(current.size.toInt())
     }
 
     // ---------------------------------------------------------------------
@@ -279,29 +442,41 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------------
 
     private fun loadSettings() {
-        page.brushSize = prefs.getFloat("brushSize", 12f)
+        mode = if (prefs.getString("mode", Mode.INK.key) == Mode.SKETCH.key) Mode.SKETCH else Mode.INK
+        for (m in Mode.entries) {
+            val s = settings.getValue(m)
+            val k = m.key
+            s.size = prefs.getFloat("$k.size", s.size)
+            s.stabilizer = prefs.getInt("$k.stabilizer", s.stabilizer)
+            s.smoothing = prefs.getInt("$k.smoothing", s.smoothing)
+            s.taper = prefs.getBoolean("$k.taper", s.taper)
+            s.snap = prefs.getBoolean("$k.snap", s.snap)
+            s.color = prefs.getInt("$k.color", s.color)
+        }
         page.eraserSizeDp = prefs.getFloat("eraserSizeDp", 32f)
-        page.stabilizer = prefs.getInt("stabilizer", 40)
-        page.smoothing = prefs.getInt("smoothing", 40)
-        page.taper = prefs.getBoolean("taper", true)
-        page.snapLines = prefs.getBoolean("snapLines", true)
         page.showPaper = prefs.getBoolean("showPaper", true)
         page.showGuides = prefs.getBoolean("showGuides", true)
         page.fingerDraws = prefs.getBoolean("fingerDraws", false)
     }
 
     private fun saveSettings() {
-        prefs.edit()
-            .putFloat("brushSize", page.brushSize)
-            .putFloat("eraserSizeDp", page.eraserSizeDp)
-            .putInt("stabilizer", page.stabilizer)
-            .putInt("smoothing", page.smoothing)
-            .putBoolean("taper", page.taper)
-            .putBoolean("snapLines", page.snapLines)
-            .putBoolean("showPaper", page.showPaper)
-            .putBoolean("showGuides", page.showGuides)
-            .putBoolean("fingerDraws", page.fingerDraws)
-            .apply()
+        val e = prefs.edit()
+        e.putString("mode", mode.key)
+        for (m in Mode.entries) {
+            val s = settings.getValue(m)
+            val k = m.key
+            e.putFloat("$k.size", s.size)
+            e.putInt("$k.stabilizer", s.stabilizer)
+            e.putInt("$k.smoothing", s.smoothing)
+            e.putBoolean("$k.taper", s.taper)
+            e.putBoolean("$k.snap", s.snap)
+            e.putInt("$k.color", s.color)
+        }
+        e.putFloat("eraserSizeDp", page.eraserSizeDp)
+        e.putBoolean("showPaper", page.showPaper)
+        e.putBoolean("showGuides", page.showGuides)
+        e.putBoolean("fingerDraws", page.fingerDraws)
+        e.apply()
     }
 
     private companion object {
@@ -309,5 +484,16 @@ class MainActivity : Activity() {
         const val BUTTON_BG = 0xFF33333B.toInt()
         const val ACTIVE_BG = 0xFF2563EB.toInt()
         const val LABEL_COLOR = 0xFFB8B8C2.toInt()
+
+        val PALETTE = listOf(
+            // Grays, plus non-photo blue for sketch lines
+            0xFF000000, 0xFF404040, 0xFF808080, 0xFFBFBFBF, 0xFFFFFFFF, 0xFF8FC7E8,
+            // Warm
+            0xFFB91C1C, 0xFFEF4444, 0xFFF97316, 0xFFFBBF24, 0xFFFDE68A, 0xFF92400E,
+            // Cool
+            0xFF15803D, 0xFF4ADE80, 0xFF0EA5E9, 0xFF1D4ED8, 0xFF7C3AED, 0xFFDB2777,
+            // Skin and hair tones
+            0xFFFDE2CF, 0xFFF5C6A5, 0xFFD9A07B, 0xFFA8714F, 0xFF6B4226, 0xFF3B2416,
+        ).map { it.toInt() }
     }
 }

@@ -4,6 +4,9 @@ A manga drawing app for Samsung tablets with an S Pen, built to turn shaky input
 
 ## Milestone 1: pen and canvas
 
+- **Two modes.** *Ink* (stabilizer, smoothing, taper and snap on) for clean final lines, and *Sketch / Color* (all off) for free drawing and coloring. Each mode remembers its own size, settings and color.
+- **Color palette.** Grays, non-photo blue for sketching, warm, cool, and skin and hair tones.
+- **Two bars.** Pen settings on top; tools, undo/redo, view toggles and page actions on the bottom.
 - **Pulled-string stabilizer.** The line trails the pen on an invisible string, so small tremors never reach the page. A blue line shows the string while you draw. Set its length with the *Stabilizer* slider (0 = off).
 - **Smoothing.** When you lift the pen, the stroke settles into a smooth curve. *Smoothing* sets how much.
 - **Pressure and taper.** Line width follows S Pen pressure; *Taper* thins both ends to a point.
