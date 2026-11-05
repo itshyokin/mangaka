@@ -26,7 +26,7 @@ android {
                 storeFile = releaseKeystore
                 storePassword = releasePassword
                 keyAlias = System.getenv("MANGAKA_KEY_ALIAS") ?: "mangaka"
-                keyPassword = releasePassword
+                keyPassword = System.getenv("MANGAKA_KEY_PASSWORD") ?: releasePassword
             }
         }
     }

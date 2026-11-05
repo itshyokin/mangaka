@@ -12,9 +12,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -26,15 +26,31 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            KS="$RUNNER_TEMP/release.keystore"
+            echo "$KEYSTORE_BASE64" | tr -d ' \r\n' | base64 -d > "$KS"
+            # Check the password and find the key alias inside the keystore.
+            if ! LISTING=$(keytool -list -keystore "$KS" -storepass "$KEYSTORE_PASSWORD" 2>&1); then
+              echo "::error::KEYSTORE_PASSWORD does not open the keystore in KEYSTORE_BASE64: $LISTING"
+              exit 1
+            fi
+            ALIAS="$KEY_ALIAS"
+            if [ -z "$ALIAS" ]; then
+              ALIAS=$(keytool -list -v -keystore "$KS" -storepass "$KEYSTORE_PASSWORD" | sed -n 's/^Alias name: //p' | head -n 1)
+            fi
+            if [ -z "$ALIAS" ]; then
+              echo "::error::No key found in the keystore."
+              exit 1
+            fi
+            echo "Signing with key alias: $ALIAS"
             {
-              echo "MANGAKA_KEYSTORE=$RUNNER_TEMP/release.jks"
+              echo "MANGAKA_KEYSTORE=$KS"
               echo "MANGAKA_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
-              echo "MANGAKA_KEY_ALIAS=${KEY_ALIAS:-mangaka}"
+              echo "MANGAKA_KEY_PASSWORD=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+              echo "MANGAKA_KEY_ALIAS=$ALIAS"
             } >> "$GITHUB_ENV"
-            echo "Signing with the permanent release key."
           else
             echo "::warning::KEYSTORE_BASE64 / KEYSTORE_PASSWORD secrets not set; signing with a temporary key. Builds won't install over each other."
           fi
