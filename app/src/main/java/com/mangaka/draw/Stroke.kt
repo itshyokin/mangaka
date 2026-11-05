@@ -44,6 +44,65 @@ class Stroke(val xs: FloatArray, val ys: FloatArray, val ws: FloatArray, val col
         return false
     }
 
+    /** Length along the centre line, in page px. */
+    val length: Float by lazy {
+        var l = 0f
+        for (i in 1 until size) l += hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1])
+        l
+    }
+
+    fun endX(atStart: Boolean) = if (atStart) xs[0] else xs[size - 1]
+    fun endY(atStart: Boolean) = if (atStart) ys[0] else ys[size - 1]
+
+    /**
+     * A copy with one end moved to (nx, ny). The line bends smoothly: points within
+     * [falloff] page px of that end follow it, fading to no movement beyond that.
+     */
+    fun withEndMoved(atStart: Boolean, nx: Float, ny: Float, falloff: Float): Stroke {
+        val n = size
+        if (n == 1) return Stroke(floatArrayOf(nx), floatArrayOf(ny), ws.copyOf(), color)
+        val i0 = if (atStart) 0 else n - 1
+        val dx = nx - xs[i0]
+        val dy = ny - ys[i0]
+        val ox = xs.copyOf()
+        val oy = ys.copyOf()
+        val l = max(falloff, 1e-3f)
+        var s = 0f
+        for (step in 0 until n) {
+            val i = if (atStart) step else n - 1 - step
+            if (step > 0) {
+                val prev = if (atStart) i - 1 else i + 1
+                s += hypot(xs[i] - xs[prev], ys[i] - ys[prev])
+            }
+            if (s >= l) break
+            val t = 1f - s / l
+            val w = t * t * (3f - 2f * t)
+            ox[i] += dx * w
+            oy[i] += dy * w
+        }
+        return Stroke(ox, oy, ws.copyOf(), color)
+    }
+
+    /** Nearest point on the centre line to (x, y), written into [out]; returns its distance. */
+    fun nearestPoint(x: Float, y: Float, out: FloatArray): Float {
+        if (size == 1) {
+            out[0] = xs[0]; out[1] = ys[0]
+            return hypot(x - xs[0], y - ys[0])
+        }
+        var best = Float.MAX_VALUE
+        for (i in 1 until size) {
+            val ax = xs[i - 1]; val ay = ys[i - 1]
+            val dx = xs[i] - ax; val dy = ys[i] - ay
+            val len2 = dx * dx + dy * dy
+            val t = if (len2 == 0f) 0f else (((x - ax) * dx + (y - ay) * dy) / len2).coerceIn(0f, 1f)
+            val qx = ax + t * dx
+            val qy = ay + t * dy
+            val d = hypot(x - qx, y - qy)
+            if (d < best) { best = d; out[0] = qx; out[1] = qy }
+        }
+        return best
+    }
+
     /**
      * Pixel-style erase: removes the part of the line within [r] of (cx, cy), splitting
      * the stroke where the eraser passes through. Returns null if the stroke is untouched,

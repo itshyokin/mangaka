@@ -28,6 +28,7 @@ class BrushSettings(
     var taper: Boolean,
     var snap: Boolean,
     var color: Int,
+    var joinEnds: Boolean,
 )
 
 enum class Mode(val key: String, val label: String) {
@@ -47,8 +48,8 @@ class MainActivity : Activity() {
 
     private var mode = Mode.INK
     private val settings = mutableMapOf(
-        Mode.INK to BrushSettings(12f, 40, 40, taper = true, snap = true, color = Color.BLACK),
-        Mode.SKETCH to BrushSettings(8f, 0, 0, taper = false, snap = false, color = Color.BLACK),
+        Mode.INK to BrushSettings(12f, 40, 40, taper = true, snap = true, color = Color.BLACK, joinEnds = true),
+        Mode.SKETCH to BrushSettings(8f, 0, 0, taper = false, snap = false, color = Color.BLACK, joinEnds = false),
     )
     private val current: BrushSettings get() = settings.getValue(mode)
 
@@ -59,16 +60,19 @@ class MainActivity : Activity() {
     private lateinit var smoothingSlider: SliderHandle
     private lateinit var taperToggle: ToggleHandle
     private lateinit var snapToggle: ToggleHandle
+    private lateinit var joinToggle: ToggleHandle
     private lateinit var strokeEraseButton: Button
     private lateinit var pixelEraseButton: Button
     private lateinit var colorSwatch: View
     private lateinit var penGroup: View
     private lateinit var eraserGroup: View
     private lateinit var fillGroup: View
+    private lateinit var endsGroup: View
 
     private lateinit var penButton: Button
     private lateinit var eraserButton: Button
     private lateinit var fillButton: Button
+    private lateinit var endsButton: Button
     private lateinit var undoButton: Button
     private lateinit var redoButton: Button
     private lateinit var layersToggle: ToggleHandle
@@ -165,8 +169,10 @@ class MainActivity : Activity() {
         }
         taperToggle = toggle("Taper", current.taper) { current.taper = it; page.taper = it }
         snapToggle = toggle("Snap lines", current.snap) { current.snap = it; page.snapLines = it }
+        joinToggle = toggle("Join ends", current.joinEnds) { current.joinEnds = it; page.joinEnds = it }
         pen.addView(taperToggle.button)
         pen.addView(snapToggle.button)
+        pen.addView(joinToggle.button)
         penGroup = pen
 
         // Eraser settings
@@ -193,7 +199,13 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
         fillGroup = fill
 
-        for (g in listOf(penGroup, eraserGroup, fillGroup)) {
+        // Ends tool
+        val ends = barLayout().apply { setPadding(0, 0, 0, 0) }
+        ends.addView(hint("Drag a line's end to move it; the line bends to follow. Orange dots are open ends. Ends snap onto other ends and lines (green ring)."),
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        endsGroup = ends
+
+        for (g in listOf(penGroup, eraserGroup, fillGroup, endsGroup)) {
             bar.addView(g, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
         return bar
@@ -206,6 +218,7 @@ class MainActivity : Activity() {
         penButton = button("Pen") { page.tool = DrawingView.Tool.PEN; updateButtons() }
         eraserButton = button("Eraser") { page.tool = DrawingView.Tool.ERASER; updateButtons() }
         fillButton = button("Fill") { page.tool = DrawingView.Tool.FILL; updateButtons() }
+        endsButton = button("Ends") { page.tool = DrawingView.Tool.ENDS; updateButtons() }
         colorSwatch = View(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(6) }
             contentDescription = "Color"
@@ -214,6 +227,7 @@ class MainActivity : Activity() {
         bar.addView(penButton)
         bar.addView(eraserButton)
         bar.addView(fillButton)
+        bar.addView(endsButton)
         bar.addView(colorSwatch)
         bar.addView(spacer())
 
@@ -257,6 +271,7 @@ class MainActivity : Activity() {
         page.smoothing = s.smoothing
         page.taper = s.taper
         page.snapLines = s.snap
+        page.joinEnds = s.joinEnds
         page.color = s.color
         if (page.tool == DrawingView.Tool.ERASER) page.tool = DrawingView.Tool.PEN
 
@@ -265,6 +280,7 @@ class MainActivity : Activity() {
         smoothingSlider.set(s.smoothing)
         taperToggle.set(s.taper)
         snapToggle.set(s.snap)
+        joinToggle.set(s.joinEnds)
         for ((m, b) in modeButtons) b.background = pill(if (m == mode) ACTIVE_BG else BUTTON_BG)
         updateButtons()
     }
@@ -446,9 +462,11 @@ class MainActivity : Activity() {
         penButton.background = pill(if (tool == DrawingView.Tool.PEN) ACTIVE_BG else BUTTON_BG)
         eraserButton.background = pill(if (tool == DrawingView.Tool.ERASER) ACTIVE_BG else BUTTON_BG)
         fillButton.background = pill(if (tool == DrawingView.Tool.FILL) ACTIVE_BG else BUTTON_BG)
+        endsButton.background = pill(if (tool == DrawingView.Tool.ENDS) ACTIVE_BG else BUTTON_BG)
         penGroup.visibility = if (tool == DrawingView.Tool.PEN) View.VISIBLE else View.GONE
         eraserGroup.visibility = if (tool == DrawingView.Tool.ERASER) View.VISIBLE else View.GONE
         fillGroup.visibility = if (tool == DrawingView.Tool.FILL) View.VISIBLE else View.GONE
+        endsGroup.visibility = if (tool == DrawingView.Tool.ENDS) View.VISIBLE else View.GONE
         val pixel = page.eraserMode == DrawingView.EraserMode.PIXEL
         strokeEraseButton.background = pill(if (!pixel) ACTIVE_BG else BUTTON_BG)
         pixelEraseButton.background = pill(if (pixel) ACTIVE_BG else BUTTON_BG)
@@ -522,6 +540,7 @@ class MainActivity : Activity() {
             s.taper = prefs.getBoolean("$k.taper", s.taper)
             s.snap = prefs.getBoolean("$k.snap", s.snap)
             s.color = prefs.getInt("$k.color", s.color)
+            s.joinEnds = prefs.getBoolean("$k.joinEnds", s.joinEnds)
         }
         page.eraserSizeDp = prefs.getFloat("eraserSizeDp", 32f)
         page.eraserMode = if (prefs.getString("eraserMode", "stroke") == "pixel") DrawingView.EraserMode.PIXEL else DrawingView.EraserMode.STROKE
@@ -543,6 +562,7 @@ class MainActivity : Activity() {
             e.putBoolean("$k.taper", s.taper)
             e.putBoolean("$k.snap", s.snap)
             e.putInt("$k.color", s.color)
+            e.putBoolean("$k.joinEnds", s.joinEnds)
         }
         e.putFloat("eraserSizeDp", page.eraserSizeDp)
         e.putString("eraserMode", if (page.eraserMode == DrawingView.EraserMode.PIXEL) "pixel" else "stroke")

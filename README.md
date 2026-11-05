@@ -25,6 +25,7 @@ Strokes are stored as vectors (centre line plus width per point), ready for fill
 - **Layers.** New pages start with *Ink* (lines) over *Flats* (color). Add, copy, merge down, delete, reorder, rename (long-press), hide, lock, set opacity and blend mode (Normal, Multiply, Screen, Overlay). Layer changes are undoable.
 - **Paint bucket.** Tap inside lines to fill. Lines come from *reference* layers (or all visible layers if none are marked); the color goes on the selected layer, tucked under the ink so there's no white halo. *Close gaps* seals small breaks between lines. Fills are vector outlines.
 - **Two erasers.** *Whole strokes* removes any line or fill it touches. *Pixel* rubs out only what's under it, splitting lines and cutting holes in fills.
+- **Join ends.** In Ink mode, starting or finishing a line near another line's end (or near its own start, to close a shape) snaps it there exactly; a green ring shows the snap. The **Ends** tool shows open line ends in orange; drag any end and the line bends to follow, snapping onto nearby ends and lines.
 - **Contextual top bar.** Shows only the selected tool's settings.
 
 ## Building

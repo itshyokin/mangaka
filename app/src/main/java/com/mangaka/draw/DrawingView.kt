@@ -29,7 +29,7 @@ import kotlin.math.min
 @SuppressLint("ViewConstructor")
 class DrawingView(context: Context) : View(context) {
 
-    enum class Tool { PEN, ERASER, FILL }
+    enum class Tool { PEN, ERASER, FILL, ENDS }
     enum class EraserMode { STROKE, PIXEL }
 
     /** Called whenever the drawing, the layers, or undo/redo availability changes. */
@@ -58,6 +58,8 @@ class DrawingView(context: Context) : View(context) {
     var smoothing = 40
     var taper = true
     var snapLines = true
+    /** Snap a new line's start and end onto nearby line ends (or its own start, to close a shape). */
+    var joinEnds = true
     var fingerDraws = false
     /** 0..10: how large a gap between lines the paint bucket seals (steps of 0.5 mm). */
     var fillGap = 3
@@ -140,6 +142,38 @@ class DrawingView(context: Context) : View(context) {
     // Paint bucket
     private var fillRunning = false
 
+    // Joining ends while drawing: where the new line's start and end will snap to (page px).
+    private var startTarget: FloatArray? = null
+    private var snapHint: FloatArray? = null
+
+    // Ends tool: draggable line ends on the active layer.
+    private class Handle(val stroke: Stroke, val atStart: Boolean, val x: Float, val y: Float, val open: Boolean)
+    private var handles: List<Handle>? = null
+    private var dragging = false
+    private var dragLayer: Layer? = null
+    private var dragOriginal: Stroke? = null
+    private var dragCurrent: Stroke? = null
+    private var dragAtStart = false
+    private var dragBefore: Contents? = null
+    private var dragSnap: FloatArray? = null
+    private val scratch = FloatArray(2)
+    private val handleOpenPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFF97316.toInt() }
+    private val handleRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 1.5f * density
+        color = Color.WHITE
+    }
+    private val handleJoinedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 1.5f * density
+        color = 0xCC9CA3AF.toInt()
+    }
+    private val snapRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f * density
+        color = 0xFF22C55E.toInt()
+    }
+
     // Hold-to-snap: pausing at the end of a stroke turns it into a straight line.
     private var snapActive = false
     private var snapEndX = 0f
@@ -212,6 +246,8 @@ class DrawingView(context: Context) : View(context) {
 
     fun selectLayer(layer: Layer) {
         doc.setActive(layer)
+        handles = null
+        invalidate()
         onChanged?.invoke()
     }
 
@@ -317,6 +353,7 @@ class DrawingView(context: Context) : View(context) {
 
     private fun contentChanged() {
         cacheValid = false
+        handles = null
         invalidate()
         onChanged?.invoke()
     }
@@ -401,8 +438,14 @@ class DrawingView(context: Context) : View(context) {
         canvas.translate(tx, ty)
         canvas.scale(scale, scale)
         if (showGuides) drawGuides(canvas)
-        if (drawing && !erasing) drawLiveStroke(canvas)
+        if (drawing && !erasing && !dragging) drawLiveStroke(canvas)
         canvas.restore()
+
+        if (tool == Tool.ENDS) drawHandles(canvas)
+        val ring = if (dragging) dragSnap else if (drawing && !erasing) snapHint else null
+        if (ring != null) {
+            canvas.drawCircle(ring[0] * scale + tx, ring[1] * scale + ty, SNAP_RING_DP * density, snapRingPaint)
+        }
 
         // Screen space overlays: stabilizer string and cursors.
         if (drawing && !erasing && !snapActive && string.length > 0f) {
@@ -411,7 +454,7 @@ class DrawingView(context: Context) : View(context) {
         }
         if (drawing && erasing) {
             canvas.drawCircle(rawX, rawY, eraserSizeDp * density / 2f, cursorPaint)
-        } else if (hovering && !drawing) {
+        } else if (hovering && !drawing && tool != Tool.ENDS) {
             val eraseHover = tool == Tool.ERASER || hoverButton
             when {
                 eraseHover -> canvas.drawCircle(hoverX, hoverY, eraserSizeDp * density / 2f, cursorPaint)
@@ -524,6 +567,7 @@ class DrawingView(context: Context) : View(context) {
                         buttonErase || eraserTip || tool == Tool.ERASER ->
                             beginStroke(e.getX(ai), e.getY(ai), e.getPressure(ai), erase = true)
                         tool == Tool.FILL -> fillAt(e.getX(ai), e.getY(ai))
+                        tool == Tool.ENDS -> beginDrag(e.getX(ai), e.getY(ai))
                         else -> beginStroke(e.getX(ai), e.getY(ai), e.getPressure(ai), erase = false)
                     }
                 }
@@ -559,6 +603,9 @@ class DrawingView(context: Context) : View(context) {
                 if (fingerDraws) {
                     if (tool == Tool.FILL) {
                         fillAt(e.x, e.y)
+                    } else if (tool == Tool.ENDS) {
+                        fingerStroke = true
+                        beginDrag(e.x, e.y)
                     } else {
                         fingerStroke = true
                         beginStroke(e.x, e.y, FINGER_PRESSURE, tool == Tool.ERASER)
@@ -721,6 +768,8 @@ class DrawingView(context: Context) : View(context) {
             return
         }
         liveX.clear(); liveY.clear(); liveP.clear()
+        startTarget = if (joinEnds) findSnap(toPageX(x), toPageY(y), null, false) else null
+        snapHint = startTarget
         pressureEma = clampPressure(p)
         string.length = stringLength()
         string.reset(x, y)
@@ -732,6 +781,10 @@ class DrawingView(context: Context) : View(context) {
     }
 
     private fun continueStroke(x: Float, y: Float, p: Float) {
+        if (dragging) {
+            updateDrag(x, y)
+            return
+        }
         if (!drawing) return
         rawX = x
         rawY = y
@@ -757,6 +810,9 @@ class DrawingView(context: Context) : View(context) {
         } else if (string.pull(x, y)) {
             emit(string.tip.x, string.tip.y)
         }
+        // Show where the line would join if lifted here (after it has left its start).
+        snapHint = if (joinEnds) endTarget(toPageX(x), toPageY(y)) else null
+        if (snapHint == null && liveLength() < SNAP_RING_DP * 2f * density / scale) snapHint = startTarget
         invalidate()
     }
 
@@ -776,7 +832,7 @@ class DrawingView(context: Context) : View(context) {
     }
 
     private fun trySnap() {
-        if (!drawing || erasing || snapActive || liveX.size < 4) return
+        if (!drawing || erasing || dragging || snapActive || liveX.size < 4) return
         val ex = toPageX(rawX)
         val ey = toPageY(rawY)
         if (hypot(ex - liveX[0], ey - liveY[0]) * scale < 24f * density) return
@@ -789,6 +845,10 @@ class DrawingView(context: Context) : View(context) {
 
     private fun endStroke() {
         removeCallbacks(snapRunnable)
+        if (dragging) {
+            endDrag()
+            return
+        }
         if (!drawing) return
         drawing = false
         val layer = strokeLayer
@@ -797,13 +857,17 @@ class DrawingView(context: Context) : View(context) {
             finishErase(layer)
             return
         }
-        val stroke = buildStroke()
+        val end = if (joinEnds) endTarget(toPageX(rawX), toPageY(rawY)) else null
+        val stroke = buildStroke(end)
         snapActive = false
+        snapHint = null
+        startTarget = null
         liveX.clear(); liveY.clear(); liveP.clear()
         if (stroke != null && layer != null) {
             layer.strokes.add(stroke)
             history.push(AddStrokeEdit(layer, stroke))
             appendToCache(layer, stroke)
+            handles = null
             onChanged?.invoke()
         }
         invalidate()
@@ -811,6 +875,12 @@ class DrawingView(context: Context) : View(context) {
 
     private fun cancelStroke() {
         removeCallbacks(snapRunnable)
+        snapHint = null
+        startTarget = null
+        if (dragging) {
+            cancelDrag()
+            return
+        }
         val layer = strokeLayer
         strokeLayer = null
         if (drawing && erasing) {
@@ -896,7 +966,32 @@ class DrawingView(context: Context) : View(context) {
         return sum / liveP.size
     }
 
-    private fun buildStroke(): Stroke? {
+    /** Builds the finished stroke, then joins its start and end onto their snap targets. */
+    private fun buildStroke(end: FloatArray?): Stroke? {
+        if (snapActive && end != null) {
+            snapEndX = end[0]
+            snapEndY = end[1]
+        }
+        var s = buildRawStroke() ?: return null
+        if (s.size < 2) return s
+        startTarget?.let { t -> s = s.withEndMoved(true, t[0], t[1], joinFalloff(s, t, true)) }
+        if (end != null && !snapActive) s = s.withEndMoved(false, end[0], end[1], joinFalloff(s, end, false))
+        return s
+    }
+
+    /** How much of the line bends to meet a snap target: a few times the jump, within limits. */
+    private fun joinFalloff(s: Stroke, t: FloatArray, atStart: Boolean): Float {
+        val jump = hypot(t[0] - s.endX(atStart), t[1] - s.endY(atStart))
+        return min(s.length * 0.45f, max(jump * 4f, 40f * density / scale))
+    }
+
+    private fun liveLength(): Float {
+        var l = 0f
+        for (i in 1 until liveX.size) l += hypot(liveX[i] - liveX[i - 1], liveY[i] - liveY[i - 1])
+        return l
+    }
+
+    private fun buildRawStroke(): Stroke? {
         val n = liveX.size
         if (n == 0) return null
         // Point spacing: about 1.5 screen px, but never coarser than a third of the brush.
@@ -931,6 +1026,192 @@ class DrawingView(context: Context) : View(context) {
     }
 
     private fun clampPressure(p: Float): Float = if (p <= 0f) 0.5f else p.coerceIn(0.05f, 1f)
+
+    // =====================================================================
+    // Joining ends
+    // =====================================================================
+
+    /** Lines a new line or a dragged end can snap to: the active layer and visible reference layers. */
+    private fun snapSources(): List<Layer> {
+        val active = doc.active
+        return doc.layers.filter { it === active || (it.visible && it.reference) }
+    }
+
+    /**
+     * Where a line end at (px, py) should snap: the nearest line end within reach, or failing
+     * that the nearest point on a line. [ignore] / [ignoreAtStart] skip the end being moved.
+     */
+    private fun findSnap(px: Float, py: Float, ignore: Stroke?, ignoreAtStart: Boolean): FloatArray? {
+        val endReach = SNAP_END_DP * density / scale
+        val lineReach = SNAP_LINE_DP * density / scale
+        var best: FloatArray? = null
+        var bestD = endReach
+        val sources = snapSources()
+        for (layer in sources) for (s in layer.strokes) {
+            if (px < s.bounds.left - endReach || px > s.bounds.right + endReach ||
+                py < s.bounds.top - endReach || py > s.bounds.bottom + endReach
+            ) continue
+            for (atStart in booleanArrayOf(true, false)) {
+                if (s === ignore && atStart == ignoreAtStart) continue
+                val d = hypot(px - s.endX(atStart), py - s.endY(atStart))
+                if (d < bestD) { bestD = d; best = floatArrayOf(s.endX(atStart), s.endY(atStart)) }
+            }
+        }
+        if (best != null) return best
+        bestD = lineReach
+        for (layer in sources) for (s in layer.strokes) {
+            if (s === ignore) continue
+            if (px < s.bounds.left - lineReach || px > s.bounds.right + lineReach ||
+                py < s.bounds.top - lineReach || py > s.bounds.bottom + lineReach
+            ) continue
+            val d = s.nearestPoint(px, py, scratch)
+            if (d < bestD) { bestD = d; best = floatArrayOf(scratch[0], scratch[1]) }
+        }
+        return best
+    }
+
+    /** Snap target for the end of the line being drawn, including its own start (to close a shape). */
+    private fun endTarget(px: Float, py: Float): FloatArray? {
+        if (liveX.size < 2) return null
+        val reach = SNAP_END_DP * density / scale
+        val len = liveLength()
+        if (len < reach * 3f) return null
+        val sx = startTarget?.get(0) ?: liveX[0]
+        val sy = startTarget?.get(1) ?: liveY[0]
+        if (hypot(px - sx, py - sy) < reach) return floatArrayOf(sx, sy)
+        // Ignore lines right next to where this one started, so it doesn't snap back onto them.
+        val t = findSnap(px, py, null, false) ?: return null
+        val st = startTarget
+        if (st != null && hypot(t[0] - st[0], t[1] - st[1]) < reach * 0.5f && len < reach * 6f) return null
+        return t
+    }
+
+    // ---- Ends tool ----
+
+    private fun currentHandles(): List<Handle> {
+        handles?.let { return it }
+        val layer = doc.active
+        val sources = snapSources()
+        val tol = max(1.5f, 2f / scale)
+        val list = ArrayList<Handle>(layer.strokes.size * 2)
+        for (s in layer.strokes) {
+            if (s.size < 2) continue
+            for (atStart in booleanArrayOf(true, false)) {
+                val x = s.endX(atStart)
+                val y = s.endY(atStart)
+                var joined = hypot(x - s.endX(!atStart), y - s.endY(!atStart)) < tol
+                if (!joined) {
+                    loop@ for (l in sources) for (o in l.strokes) {
+                        if (o !== s && o.hits(x, y, tol)) { joined = true; break@loop }
+                    }
+                }
+                list.add(Handle(s, atStart, x, y, !joined))
+            }
+        }
+        handles = list
+        return list
+    }
+
+    private fun drawHandles(canvas: Canvas) {
+        if (dragging) {
+            val s = dragCurrent ?: return
+            val hx = s.endX(dragAtStart) * scale + tx
+            val hy = s.endY(dragAtStart) * scale + ty
+            canvas.drawCircle(hx, hy, 7f * density, handleOpenPaint)
+            canvas.drawCircle(hx, hy, 7f * density, handleRingPaint)
+            return
+        }
+        val view = visiblePageRect()
+        for (h in currentHandles()) {
+            if (!view.contains(h.x, h.y)) continue
+            val hx = h.x * scale + tx
+            val hy = h.y * scale + ty
+            if (h.open) {
+                canvas.drawCircle(hx, hy, 5f * density, handleOpenPaint)
+                canvas.drawCircle(hx, hy, 5f * density, handleRingPaint)
+            } else {
+                canvas.drawCircle(hx, hy, 3.5f * density, handleJoinedPaint)
+            }
+        }
+    }
+
+    private fun beginDrag(sx: Float, sy: Float) {
+        val layer = doc.active
+        if (!canEdit(layer)) return
+        val px = toPageX(sx)
+        val py = toPageY(sy)
+        val reach = GRAB_DP * density / scale
+        var best: Handle? = null
+        var bestD = reach
+        for (h in currentHandles()) {
+            // Open ends win ties: they're the ones that need joining.
+            val d = hypot(h.x - px, h.y - py) - if (h.open) reach * 0.25f else 0f
+            if (d < bestD) { bestD = d; best = h }
+        }
+        val h = best ?: return
+        dragging = true
+        dragLayer = layer
+        dragOriginal = h.stroke
+        dragCurrent = h.stroke
+        dragAtStart = h.atStart
+        dragBefore = Contents.of(layer)
+        dragSnap = null
+        rawX = sx
+        rawY = sy
+        invalidate()
+    }
+
+    private fun updateDrag(sx: Float, sy: Float) {
+        val layer = dragLayer ?: return
+        val original = dragOriginal ?: return
+        val current = dragCurrent ?: return
+        rawX = sx
+        rawY = sy
+        var px = toPageX(sx)
+        var py = toPageY(sy)
+        val snap = findSnap(px, py, original, dragAtStart)
+        dragSnap = snap
+        if (snap != null) { px = snap[0]; py = snap[1] }
+        val jump = hypot(px - original.endX(dragAtStart), py - original.endY(dragAtStart))
+        val falloff = min(original.length * 0.8f, max(jump * 3f, 40f * density / scale))
+        val moved = original.withEndMoved(dragAtStart, px, py, falloff)
+        val i = layer.strokes.indexOf(current)
+        if (i >= 0) layer.strokes[i] = moved
+        dragCurrent = moved
+        cacheValid = false
+        invalidate()
+    }
+
+    private fun endDrag() {
+        val layer = dragLayer
+        val before = dragBefore
+        if (layer != null && before != null && dragCurrent !== dragOriginal) {
+            history.push(ContentEdit(layer, before, Contents.of(layer)))
+        }
+        clearDrag()
+        contentChanged()
+    }
+
+    private fun cancelDrag() {
+        val layer = dragLayer
+        val original = dragOriginal
+        val current = dragCurrent
+        if (layer != null && original != null && current != null) {
+            val i = layer.strokes.indexOf(current)
+            if (i >= 0) layer.strokes[i] = original
+        }
+        clearDrag()
+        contentChanged()
+    }
+
+    private fun clearDrag() {
+        dragging = false
+        dragLayer = null
+        dragOriginal = null
+        dragCurrent = null
+        dragBefore = null
+        dragSnap = null
+    }
 
     // =====================================================================
     // Paint bucket
@@ -985,5 +1266,12 @@ class DrawingView(context: Context) : View(context) {
         const val MAX_SCALE = 12f
         const val SNAP_HOLD_MS = 550L
         const val SNAP_STILL_DP = 6f
+        /** How close a line end must come to another end to join it. */
+        const val SNAP_END_DP = 18f
+        /** How close a line end must come to the middle of another line to join it. */
+        const val SNAP_LINE_DP = 10f
+        const val SNAP_RING_DP = 10f
+        /** How close the pen must be to grab an end in the Ends tool. */
+        const val GRAB_DP = 28f
     }
 }
