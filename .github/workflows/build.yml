@@ -2,7 +2,11 @@ name: Build APK
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -17,12 +21,33 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK
+      - name: Load signing key
+        env:
+          SIGNING_KEYSTORE: ${{ secrets.SIGNING_KEYSTORE }}
+        run: |
+          if [ -n "$SIGNING_KEYSTORE" ]; then
+            echo "$SIGNING_KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "MANGAKA_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "Signing with the permanent release key."
+          else
+            echo "::warning::SIGNING_KEYSTORE secret not set; signing with a temporary key. Builds won't install over each other."
+          fi
+
+      - name: Build release APK
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleRelease --no-daemon
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk "out/Mangaka-build-${{ github.run_number }}.apk"
 
-      - uses: actions/upload-artifact@v4
+      - name: Publish to Releases
+        uses: softprops/action-gh-release@v2
         with:
-          name: mangaka-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          tag_name: build-${{ github.run_number }}
+          name: Mangaka build ${{ github.run_number }}
+          body: |
+            ${{ github.event.head_commit.message }}
+
+            Install: download the .apk below on your tablet and open it.
+          files: out/*.apk
+          make_latest: true

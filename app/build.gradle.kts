@@ -11,13 +11,33 @@ android {
         applicationId = "com.mangaka.draw"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
+        // Each cloud build gets a higher version code, so it installs as an update.
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
         versionName = "0.1.0"
+    }
+
+    // The release key comes from the SIGNING_KEYSTORE repository secret (see the workflow).
+    // Without it, release builds fall back to the debug key.
+    val releaseKeystore = System.getenv("MANGAKA_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("MANGAKA_KEYSTORE_PASSWORD") ?: "mangaka-release"
+                keyAlias = "mangaka"
+                keyPassword = System.getenv("MANGAKA_KEYSTORE_PASSWORD") ?: "mangaka-release"
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = if (releaseKeystore != null) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

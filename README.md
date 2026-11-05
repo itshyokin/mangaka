@@ -21,9 +21,9 @@ Strokes are stored as vectors (centre line plus width per point), ready for fill
 
 ### Option A: GitHub (no PC setup)
 
-1. Create a GitHub repository and push this folder to it.
-2. Open the repository's **Actions** tab. The *Build APK* workflow runs on every push (or press *Run workflow*).
-3. When it finishes, download **mangaka-debug-apk** from the run page, unzip it, and open the `.apk` on the tablet. Android will ask you to allow installs from that app (Files or your browser) once.
+Every push to `main` builds a signed APK and publishes it on the repository's **Releases** page as *Mangaka build N*. On the tablet, open the latest release, download the `.apk`, and open it. Android asks once to allow installs from your browser or Files app.
+
+Signing: add the repository secret **SIGNING_KEYSTORE** (Settings → Secrets and variables → Actions) containing the base64 text of the release keystore. Every build is then signed with the same key, so new builds install over old ones. Keep a private backup of the keystore; a lost key means uninstalling and reinstalling to update.
 
 ### Option B: Android Studio
 
