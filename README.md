@@ -23,7 +23,7 @@ Strokes are stored as vectors (centre line plus width per point), ready for fill
 
 Every push to `main` builds a signed APK and publishes it on the repository's **Releases** page as *Mangaka build N*. On the tablet, open the latest release, download the `.apk`, and open it. Android asks once to allow installs from your browser or Files app.
 
-Signing: add the repository secret **SIGNING_KEYSTORE** (Settings → Secrets and variables → Actions) containing the base64 text of the release keystore. Every build is then signed with the same key, so new builds install over old ones. Keep a private backup of the keystore; a lost key means uninstalling and reinstalling to update.
+Signing: add the repository secrets **KEYSTORE_BASE64** (the base64 text of the release keystore) and **KEYSTORE_PASSWORD** under Settings → Secrets and variables → Actions. An optional **KEY_ALIAS** secret overrides the default alias `mangaka`. Every build is then signed with the same key, so new builds install over old ones. Keep a private backup of the keystore; a lost key means uninstalling and reinstalling to update.
 
 ### Option B: Android Studio
 

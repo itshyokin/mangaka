@@ -16,16 +16,17 @@ android {
         versionName = "0.1.0"
     }
 
-    // The release key comes from the SIGNING_KEYSTORE repository secret (see the workflow).
-    // Without it, release builds fall back to the debug key.
+    // The release key comes from the KEYSTORE_BASE64 / KEYSTORE_PASSWORD repository
+    // secrets (see the workflow). Without them, release builds fall back to the debug key.
     val releaseKeystore = System.getenv("MANGAKA_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
+    val releasePassword = System.getenv("MANGAKA_KEYSTORE_PASSWORD")
     signingConfigs {
-        if (releaseKeystore != null) {
+        if (releaseKeystore != null && releasePassword != null) {
             create("release") {
                 storeFile = releaseKeystore
-                storePassword = System.getenv("MANGAKA_KEYSTORE_PASSWORD") ?: "mangaka-release"
-                keyAlias = "mangaka"
-                keyPassword = System.getenv("MANGAKA_KEYSTORE_PASSWORD") ?: "mangaka-release"
+                storePassword = releasePassword
+                keyAlias = System.getenv("MANGAKA_KEY_ALIAS") ?: "mangaka"
+                keyPassword = releasePassword
             }
         }
     }
@@ -33,7 +34,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = if (releaseKeystore != null) {
+            signingConfig = if (releaseKeystore != null && releasePassword != null) {
                 signingConfigs.getByName("release")
             } else {
                 signingConfigs.getByName("debug")

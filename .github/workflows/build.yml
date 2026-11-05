@@ -23,14 +23,20 @@ jobs:
 
       - name: Load signing key
         env:
-          SIGNING_KEYSTORE: ${{ secrets.SIGNING_KEYSTORE }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
-          if [ -n "$SIGNING_KEYSTORE" ]; then
-            echo "$SIGNING_KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
-            echo "MANGAKA_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            {
+              echo "MANGAKA_KEYSTORE=$RUNNER_TEMP/release.jks"
+              echo "MANGAKA_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+              echo "MANGAKA_KEY_ALIAS=${KEY_ALIAS:-mangaka}"
+            } >> "$GITHUB_ENV"
             echo "Signing with the permanent release key."
           else
-            echo "::warning::SIGNING_KEYSTORE secret not set; signing with a temporary key. Builds won't install over each other."
+            echo "::warning::KEYSTORE_BASE64 / KEYSTORE_PASSWORD secrets not set; signing with a temporary key. Builds won't install over each other."
           fi
 
       - name: Build release APK
